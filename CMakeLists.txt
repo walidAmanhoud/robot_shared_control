@@ -24,6 +24,7 @@ if(NOT Eigen_FOUND)
   include(cmake/FindEigen3.cmake)
 endif() 
 
+
 ## Generate added messages and services
 generate_messages(DEPENDENCIES std_msgs)
 
@@ -34,7 +35,7 @@ generate_dynamic_reconfigure_options(cfg/footControl_params.cfg
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES ${PROJECT_NAME}
-  CATKIN_DEPENDS roscpp rospy std_msgs message_generation kdl_parser dynamic_reconfigure svm_grad sg_differentiation utils
+  CATKIN_DEPENDS roscpp rospy std_msgs message_generation kdl_parser dynamic_reconfigure svm_grad sg_differentiation utils custom_msgs
   # DEPENDS Eigen
  )
 

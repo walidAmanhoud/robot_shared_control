@@ -3,13 +3,14 @@
 
 FootControl* FootControl::me = NULL;
 
-FootControl::FootControl(ros::NodeHandle &n, double frequency):
+FootControl::FootControl(ros::NodeHandle &n, double frequency, std::string filename):
   _n(n),
   _loopRate(frequency),
   _dt(1.0f/frequency),
   _xCFilter(3,3,6,1.0f/frequency),
   _xDFilter(3,3,6,1.0f/frequency),
-  _zDirFilter(3,3,6,1.0f/frequency)
+  _zDirFilter(3,3,6,1.0f/frequency),
+  _filename(filename)
 {
   me = this;
 
@@ -51,20 +52,27 @@ FootControl::FootControl(ros::NodeHandle &n, double frequency):
     _wrenchBiasOK[k] = false;
     _d1[k] = 1.0f;
 
-    _footData[k].setConstant(0.0f);
+    _footPose[k].setConstant(0.0f);
+    _footWrench[k].setConstant(0.0f);
+    _footDesiredWrench[k].setConstant(0.0f);
     _footPosition[k].setConstant(0.0f);
     _vm[k].setConstant(0.0f);
+    _footSensor[k].setConstant(0.0f);
     _footInterfaceSequenceID[k] = 0;    
-    _firstFootInterfaceData[k] = false;
+    _firstFootInterfacePose[k] = false;
+    _firstFootOutput[k] = false;
+    _firstFootSensor[k] = false;
+    _desiredFootWrench[k].setConstant(0.0f);
+    _filteredFootSensor[k].setConstant(0.0f);
 
   }
   for(int k = 0; k < TOTAL_NB_MARKERS; k++)
   {
-    _firstOptitrackPose[k] = false;
+    _firstOptitrackPose[k] = true;
   }
-  _optitrackOK = false;
+  _optitrackOK = true;
   _stop = false;
-  _firstObjectPose = false;
+  _firstObjectPose = true;
   _leftRobotOrigin << 0.066f, 0.9f, 0.0f;
 
   _objectDim << 0.41f, 0.22f, 0.22f;
@@ -110,6 +118,13 @@ FootControl::FootControl(ros::NodeHandle &n, double frequency):
   _objectGrasped = false;
   _targetForce = 15.0f;
 
+  _x0[LEFT](0) = _leftRobotOrigin(0)-0.60f;
+  _x0[LEFT](1) = _leftRobotOrigin(1)-0.35f;
+  _x0[LEFT](2) = _leftRobotOrigin(2)+0.34f;
+  _x0[RIGHT](0) = -0.52f;
+  _x0[RIGHT](1) = 0.4f;
+  _x0[RIGHT](2) = 0.34f;
+
 }
 
 
@@ -133,9 +148,17 @@ bool FootControl::init()
   _subOptitrackPose[P3] = _n.subscribe<geometry_msgs::PoseStamped>("/optitrack/p3/pose", 1, boost::bind(&FootControl::updateOptitrackPose,this,_1,P3),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
   _subOptitrackPose[P4] = _n.subscribe<geometry_msgs::PoseStamped>("/optitrack/p4/pose", 1, boost::bind(&FootControl::updateOptitrackPose,this,_1,P4),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
   
-  _subFootInterfaceData[RIGHT] = _n.subscribe<geometry_msgs::PoseStamped>("/FI_Pose",1, boost::bind(&FootControl::updateFootInterfaceData,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
-  _subFootInterfaceData[LEFT] = _n.subscribe<geometry_msgs::PoseStamped>("/FI_Pose/2",1, boost::bind(&FootControl::updateFootInterfaceData,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+  // _subFootInterfacePose[RIGHT] = _n.subscribe<geometry_msgs::PoseStamped>("/FI_Pose/1",1, boost::bind(&FootControl::updateFootInterfacePose,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+  // _subFootInterfacePose[LEFT] = _n.subscribe<geometry_msgs::PoseStamped>("/FI_Pose/2",1, boost::bind(&FootControl::updateFootInterfacePose,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
 
+  // _subFootInterfaceWrench[RIGHT] = _n.subscribe<geometry_msgs::WrenchStamped>("/FI_Wrench/1",1, boost::bind(&FootControl::updateFootInterfaceWrench,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+  // _subFootInterfaceWrench[LEFT] = _n.subscribe<geometry_msgs::WrenchStamped>("/FI_Wrench/2",1, boost::bind(&FootControl::updateFootInterfaceWrench,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+
+  _subFootOutput[RIGHT] = _n.subscribe<custom_msgs::FootOutputMsg>("/FI_Output/1",1, boost::bind(&FootControl::updateFootOutput,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+  _subFootOutput[LEFT] = _n.subscribe<custom_msgs::FootOutputMsg>("/FI_Output/2",1, boost::bind(&FootControl::updateFootOutput,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+
+  _subFootSensor[RIGHT] = _n.subscribe<geometry_msgs::Wrench>("/FI_FFeedback/1",1, boost::bind(&FootControl::updateFootSensor,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+  _subFootSensor[LEFT] = _n.subscribe<geometry_msgs::Wrench>("/FI_FFeedback/2",1, boost::bind(&FootControl::updateFootSensor,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
   // Publisher definitions
   _pubDesiredTwist[RIGHT] = _n.advertise<geometry_msgs::Twist>("/lwr/joint_controllers/passive_ds_command_vel", 1);
   _pubDesiredOrientation[RIGHT] = _n.advertise<geometry_msgs::Quaternion>("/lwr/joint_controllers/passive_ds_command_orient", 1);
@@ -151,6 +174,17 @@ bool FootControl::init()
 
   _pubMarker = _n.advertise<visualization_msgs::Marker>("FootControl/cube", 1);
 
+  // _pubDesiredFootWrench[RIGHT] = _n.advertise<geometry_msgs::Wrench>("/FI_setWrench/1", 1);
+  // _pubDesiredFootWrench[LEFT] = _n.advertise<geometry_msgs::Wrench>("/FI_setWrench/2", 1);
+
+  _pubFootInput[RIGHT] = _n.advertise<custom_msgs::FootInputMsg>("/FI_Input/1", 1);
+  _pubFootInput[LEFT] = _n.advertise<custom_msgs::FootInputMsg>("/FI_Input/2", 1);
+
+  _pubFootSensor[RIGHT] = _n.advertise<geometry_msgs::WrenchStamped>("/FootControl/filteredFootSensorRight", 1);
+  _pubFootSensor[LEFT] = _n.advertise<geometry_msgs::WrenchStamped>("/FootControl/filteredFootSensorLeft", 1);
+
+
+
 
   // Dynamic reconfigure definition
   _dynRecCallback = boost::bind(&FootControl::dynamicReconfigureCallback, this, _1, _2);
@@ -158,17 +192,19 @@ bool FootControl::init()
 
   signal(SIGINT,FootControl::stopNode);
 
+  _outputFile.open(ros::package::getPath(std::string("robot_shared_control"))+"/data_foot/"+_filename+".txt");
+
   if(!_n.getParamCached("/lwr/ds_param/damping_eigval0",_d1[RIGHT]))
   {
     ROS_ERROR("[FootControl]: Cannot read first eigen value of passive ds controller for right robot");
     return false;
   }
 
-  if(!_n.getParamCached("/lwr2/ds_param/damping_eigval0",_d1[LEFT]))
-  {
-    ROS_ERROR("[FootControl]: Cannot read first eigen value of passive ds controller for left robot");
-    return false;
-  }
+  // if(!_n.getParamCached("/lwr2/ds_param/damping_eigval0",_d1[LEFT]))
+  // {
+  //   ROS_ERROR("[FootControl]: Cannot read first eigen value of passive ds controller for left robot");
+  //   return false;
+  // }
   if (_n.ok()) 
   { 
     // Wait for poses being published
@@ -190,14 +226,18 @@ void FootControl::run()
 
   while (!_stop) 
   {
-    // std::cerr << (int) _firstRobotPose << " " << (int) _firstRobotTwist << " " << (int) _firstFootInterfaceData << std::endl;
+    // std::cerr << (int) _firstRobotPose << " " << (int) _firstRobotTwist << " " << (int) _firstFootInterfacePose << std::endl;
     // std::cerr << _firstOptitrackPose[ROBOT_BASIS_LEFT] << _firstOptitrackPose[ROBOT_BASIS_RIGHT] << _firstOptitrackPose[P1] <<
-       // _firstOptitrackPose[P2] << _firstOptitrackPose[P3] << _firstOptitrackPose[P4] << _firstDampingMatrix << _firstFootInterfaceData<<std::endl;
-    if(_firstRobotPose[RIGHT] && _firstRobotPose[LEFT] && _firstRobotTwist[RIGHT] && _firstRobotTwist[LEFT] &&
-       _wrenchBiasOK[RIGHT] && _wrenchBiasOK[LEFT] && _firstDampingMatrix[RIGHT] && _firstDampingMatrix[LEFT] &&
-       _firstOptitrackPose[ROBOT_BASIS_LEFT] && _firstOptitrackPose[ROBOT_BASIS_RIGHT] && _firstOptitrackPose[P1] &&
-       _firstOptitrackPose[P2] && _firstOptitrackPose[P3] && _firstOptitrackPose[P4] &&
-       _firstFootInterfaceData[LEFT] && _firstFootInterfaceData[RIGHT])
+       // _firstOptitrackPose[P2] << _firstOptitrackPose[P3] << _firstOptitrackPose[P4] << _firstDampingMatrix << _firstFootInterfacePose<<std::endl;
+    // if(_firstRobotPose[RIGHT] && _firstRobotPose[LEFT] && _firstRobotTwist[RIGHT] && _firstRobotTwist[LEFT] &&
+    //    _wrenchBiasOK[RIGHT] && _wrenchBiasOK[LEFT] && _firstDampingMatrix[RIGHT] && _firstDampingMatrix[LEFT] &&
+    //    _firstOptitrackPose[ROBOT_BASIS_LEFT] && _firstOptitrackPose[ROBOT_BASIS_RIGHT] && _firstOptitrackPose[P1] &&
+    //    _firstOptitrackPose[P2] && _firstOptitrackPose[P3] && _firstOptitrackPose[P4] &&
+    //    _firstFootInterfacePose[LEFT] && _firstFootInterfacePose[RIGHT] && _firstFootInterfaceWrench[LEFT] && _firstFootInterfaceWrench[RIGHT])
+    // std::cerr << (int) _firstRobotPose[RIGHT] << (int) _firstRobotTwist[RIGHT] << (int) _wrenchBiasOK[RIGHT] << (int) _firstDampingMatrix[RIGHT] << (int) _firstFootInterfacePose[RIGHT] << std::endl;
+    if(_firstRobotPose[RIGHT] && _firstRobotTwist[RIGHT] && _wrenchBiasOK[RIGHT] && _firstDampingMatrix[RIGHT] && _firstFootOutput[RIGHT] && 
+       _firstRobotPose[RIGHT] && _firstRobotTwist[RIGHT] && _wrenchBiasOK[LEFT] && _firstFootOutput[LEFT] 
+        && _firstFootSensor[RIGHT])
     {
       _mutex.lock();
 
@@ -226,7 +266,7 @@ void FootControl::run()
         }
 
         // Log data
-        // logData();
+        logData();
       }
 
       _mutex.unlock();
@@ -243,13 +283,15 @@ void FootControl::run()
   {
     _vd[k].setConstant(0.0f);
     _omegad[k].setConstant(0.0f);
-    _qd[k] = _q[k];    
+    _qd[k] = _q[k];  
+    _desiredFootWrench[k].setConstant(0.0f);  
   }
 
   publishData();
   ros::spinOnce();
   _loopRate.sleep();
 
+  _outputFile.close();
   ros::shutdown();
 }
 
@@ -356,15 +398,15 @@ void FootControl::computeCommand()
 
   if(_objectGrasped) // Object reachable and grasped
   {
-    _xdD << 0.0f,-1.0f,0.0f;
-    _xdD *= 0.20f;
   }
   else // Object reachable but not grasped
   {
+    _xdD = _xoD;
   }
 
-    _xdD = _xoD;
-  std::cerr << "Object grasped: " << (int) _objectGrasped << " alpha: " << alpha <<std::endl;
+  _xdD << 0.0f,-1.0f,0.0f;
+  _xdD *= 0.20f;
+  // std::cerr << "Object grasped: " << (int) _objectGrasped << " alpha: " << alpha <<std::endl;
 
   _e1[LEFT] = _xdD.normalized();
   _e1[RIGHT] = -_xdD.normalized();
@@ -375,34 +417,39 @@ void FootControl::computeCommand()
 
   positionVelocityMapping();
 
+  computeDesiredFootWrench();
+
+  std::cerr << _footSensor[RIGHT].segment(0,3).transpose() << std::endl;
+
   for(int k = 0; k < NB_ROBOTS; k++)
   {
-    _normalForce[k] = fabs((_wRb[k]*_filteredWrench[k].segment(0,3)).dot(_e1[k]));
+    // _normalForce[k] = fabs((_wRb[k]*_filteredWrench[k].segment(0,3)).dot(_e1[k]));
 
-    if(_d1[k]<1.0f)
-    {
-      _d1[k] = 1.0f;
-    }
+    // if(_d1[k]<1.0f)
+    // {
+    //   _d1[k] = 1.0f;
+    // }
 
-    if(_objectGrasped)
-    {
-      _Fd[k] = _targetForce;
-    }
-    else
-    {
-      _Fd[k] = _targetForce*alpha;    
-    }
+    // if(_objectGrasped)
+    // {
+    //   _Fd[k] = _targetForce;
+    // }
+    // else
+    // {
+    //   _Fd[k] = _targetForce*alpha;    
+    // }
 
-    if(_e1[LEFT].dot(_vm[LEFT])<0 && _e1[RIGHT].dot(_vm[RIGHT])<0)
-    {
-      _Fd[k] = 0.0f;
-    }
+    // if(_e1[LEFT].dot(_vm[LEFT])<0 && _e1[RIGHT].dot(_vm[RIGHT])<0)
+    // {
+    //   _Fd[k] = 0.0f;
+    // }
 
     // _fx[k] = _vm[k];
     // _vd[k] = _vm[k];
     // _vd[k] = _vm[k]+(_Fd[k]/_d1[k])*_e1[k];
     // _vd[k].setConstant(0.0f);
     _vd[k] = _x0[k]+_xh[k]-_x[k];
+    // _vd[k].setConstant(0.0f);
 
     if(_vd[k].norm()>0.3f)
     {
@@ -424,20 +471,21 @@ void FootControl::computeCommand()
   computeDesiredOrientation();
   // _qd[0] << 0.0f,0.0f,1.0f,0.0f;
   // _qd[1] << 0.0f,0.0f,1.0f,0.0f;
+
   // // Compute desired orientation
 }
 
 
 void FootControl::footDataTransformation()
 {
-  _footPosition[RIGHT](0) = FOOT_INTERFACE_Y_RANGE_RIGHT/2.0f-_footData[RIGHT](1);
-  _footPosition[RIGHT](1) = -(FOOT_INTERFACE_X_RANGE_RIGHT/2.0f-_footData[RIGHT](0));
-  _footPosition[RIGHT](2) = -_footData[RIGHT](3);
-  _footPosition[LEFT](0) = FOOT_INTERFACE_Y_RANGE_LEFT/2.0f+_footData[LEFT](1);
-  _footPosition[LEFT](1) = (FOOT_INTERFACE_X_RANGE_LEFT/2.0f+_footData[LEFT](0));
-  _footPosition[LEFT](2) = _footData[LEFT](3);
+  _footPosition[RIGHT](0) = _footPose[RIGHT](1);
+  _footPosition[RIGHT](1) = -_footPose[RIGHT](0);
+  _footPosition[RIGHT](2) = _footPose[RIGHT](3);
+  _footPosition[LEFT](0) = _footPose[LEFT](1);
+  _footPosition[LEFT](1) = -_footPose[LEFT](0);
+  _footPosition[LEFT](2) = _footPose[LEFT](3);
 
-  // std::cerr << "Before transformation: " <<_footData.segment(0,4).transpose() << std::endl;
+  // std::cerr << "Before transformation: " <<_footPose.segment(0,4).transpose() << std::endl;
   // std::cerr << "After transformation: " << _footPosition.transpose() << std::endl;
 }
 
@@ -445,8 +493,8 @@ void FootControl::positionPositionMapping()
 {
 
   Eigen::Vector3f gains[NB_ROBOTS];
-  gains[RIGHT] << 2*0.7/FOOT_INTERFACE_Y_RANGE_RIGHT, 2*0.7/FOOT_INTERFACE_X_RANGE_RIGHT, 2*0.5/FOOT_INTERFACE_PHI_RANGE_RIGHT;
-  gains[LEFT] << 2*0.7f/FOOT_INTERFACE_Y_RANGE_LEFT, 2*0.7/FOOT_INTERFACE_X_RANGE_LEFT, 2*0.5/FOOT_INTERFACE_PHI_RANGE_LEFT;
+  gains[RIGHT] << 2*_xyPositionMapping/FOOT_INTERFACE_Y_RANGE_RIGHT, 2*_xyPositionMapping/FOOT_INTERFACE_X_RANGE_RIGHT, 2*_zPositionMapping/FOOT_INTERFACE_PHI_RANGE_RIGHT;
+  gains[LEFT] << 2*_xyPositionMapping/FOOT_INTERFACE_Y_RANGE_LEFT, 2*_xyPositionMapping/FOOT_INTERFACE_X_RANGE_LEFT, 2*_zPositionMapping/FOOT_INTERFACE_PHI_RANGE_LEFT;
   
   for(int k = 0; k < NB_ROBOTS; k++)
   {
@@ -466,11 +514,69 @@ void FootControl::positionVelocityMapping()
   for(int k = 0; k < NB_ROBOTS; k++)
   {
     _vm[k] = gains[k].cwiseProduct(_footPosition[k]);
-   if(_vm[k].norm()>_velocityLimit)
+    if(_vm[k].norm()>_velocityLimit)
     {
       _vm[k] *= _velocityLimit/_vm[k].norm();
     }    
-    std::cerr << "Master velocity " << k << " : " <<_vm[k].transpose() << std::endl;
+    // std::cerr << "Master velocity " << k << " : " <<_vm[k].transpose() << std::endl;
+  }
+}
+
+
+void FootControl::computeDesiredFootWrench()
+{
+  Eigen::Vector3f temp;
+  temp = _wRb[RIGHT]*_filteredWrench[RIGHT].segment(0,3);
+  _desiredFootWrench[RIGHT](1) = temp(0);
+  _desiredFootWrench[RIGHT](0) = -temp(1);
+  _desiredFootWrench[RIGHT](3) = temp(2)*0.205/5;
+
+  temp = _wRb[LEFT]*_filteredWrench[LEFT].segment(0,3);
+  _desiredFootWrench[LEFT](1) = temp(0);
+  _desiredFootWrench[LEFT](0) = -temp(1);
+  _desiredFootWrench[LEFT](3) = temp(2)*0.205/5;
+
+  for(int k = 0 ; k < 3; k++)
+  {
+    if(_desiredFootWrench[RIGHT](k)>25.0f)
+    {
+      _desiredFootWrench[RIGHT](k) = 25.0f;
+    }
+    else if(_desiredFootWrench[RIGHT](k)<-25.0f)
+    {
+      _desiredFootWrench[RIGHT](k) = -25.0f;
+    }
+
+    if(_desiredFootWrench[LEFT](k)>25.0f)
+    {
+      _desiredFootWrench[LEFT](k) = 25.0f;
+    }
+    else if(_desiredFootWrench[LEFT](k)<-25.0f)
+    {
+      _desiredFootWrench[LEFT](k) = -25.0f;
+    }
+  }
+
+  for(int k = 0 ; k < 3; k++)
+  {
+    if(_desiredFootWrench[RIGHT](k+3)>0.187f*40/9.15)
+    {
+      _desiredFootWrench[RIGHT](k+3) = 0.187f*40/9.15;
+    }
+    else if(_desiredFootWrench[RIGHT](k+3)<-0.187f*40/9.15)
+    {
+      _desiredFootWrench[RIGHT](k+3) = -0.187f*40/9.15;
+    }
+
+    if(_desiredFootWrench[LEFT](k+3)>0.212f*40/9.15)
+    {
+      _desiredFootWrench[LEFT](k+3) = 0.212f*40/9.15;
+    }
+    else if(_desiredFootWrench[LEFT](k+3)<-0.212f*40/9.15)
+    {
+      _desiredFootWrench[LEFT](k+3) = -0.212f*40/9.15;
+    }
+
   }
 }
 // void FootControl::updateSurfaceInformation()
@@ -759,69 +865,82 @@ void FootControl::computeDesiredOrientation()
  for(int k = 0; k < NB_ROBOTS; k++)
   {
     // Compute rotation error between current orientation and plane orientation using Rodrigues' law
-    Eigen::Vector3f ref;
-    if(k == (int) RIGHT)
-    {
-      ref = -_xdD.normalized();
-    }
-    else
-    {
-      ref = _xdD.normalized();
-    }
+    // Eigen::Vector3f ref;
+    // if(k == (int) RIGHT)
+    // {
+    //   ref = -_xdD.normalized();
+    // }
+    // else
+    // {
+    //   ref = _xdD.normalized();
+    // }
       
-    ref.normalize();
+    // ref.normalize();
 
-    // Compute rotation error between current orientation and plane orientation using Rodrigues' law
-    Eigen::Vector3f u;
-    u = (_wRb[k].col(2)).cross(ref);
-    float c = (_wRb[k].col(2)).transpose()*ref;  
-    float s = u.norm();
-    u /= s;
+    // // Compute rotation error between current orientation and plane orientation using Rodrigues' law
+    // Eigen::Vector3f u;
+    // u = (_wRb[k].col(2)).cross(ref);
+    // float c = (_wRb[k].col(2)).transpose()*ref;  
+    // float s = u.norm();
+    // u /= s;
 
-    Eigen::Matrix3f K;
-    K << Utils::getSkewSymmetricMatrix(u);
+    // Eigen::Matrix3f K;
+    // K << Utils::getSkewSymmetricMatrix(u);
 
-    Eigen::Matrix3f Re;
-    if(fabs(s)< FLT_EPSILON)
-    {
-      Re = Eigen::Matrix3f::Identity();
-    }
-    else
-    {
-      Re = Eigen::Matrix3f::Identity()+s*K+(1-c)*K*K;
-    }
+    // Eigen::Matrix3f Re;
+    // if(fabs(s)< FLT_EPSILON)
+    // {
+    //   Re = Eigen::Matrix3f::Identity();
+    // }
+    // else
+    // {
+    //   Re = Eigen::Matrix3f::Identity()+s*K+(1-c)*K*K;
+    // }
     
-    // Convert rotation error into axis angle representation
-    Eigen::Vector3f omega;
-    float angle;
-    Eigen::Vector4f qtemp = Utils::rotationMatrixToQuaternion(Re);
-    Utils::quaternionToAxisAngle(qtemp,omega,angle);
+    // // Convert rotation error into axis angle representation
+    // Eigen::Vector3f omega;
+    // float angle;
+    // Eigen::Vector4f qtemp = Utils::rotationMatrixToQuaternion(Re);
+    // Utils::quaternionToAxisAngle(qtemp,omega,angle);
 
-    // Compute final quaternion on plane
-    Eigen::Vector4f qf = Utils::quaternionProduct(qtemp,_q[k]);
+    // // Compute final quaternion on plane
+    // Eigen::Vector4f qf = Utils::quaternionProduct(qtemp,_q[k]);
+ 
 
-    // Perform quaternion slerp interpolation to progressively orient the end effector while approaching the surface
-    if(k == (int)RIGHT)
-    {
-      _normalDistance[k] = (_x[k]-(_xoC+_xoD/2.0f)).dot(_xoD.normalized());
-    }
-    else
-    {
-      _normalDistance[k] = (_x[k]-(_xoC-_xoD/2.0f)).dot(-_xoD.normalized());
-    }
-
-    if(_normalDistance[k]<0.0f)
-    {
-      _normalDistance[k] = 0.0f;
-    }
-    std::cerr << "Quaternion " << k  << " " << _normalDistance[k] << std::endl;
+    // if(_normalDistance[k]<0.0f)
+    // {
+    //   _normalDistance[k] = 0.0f;
+    // }
+    // std::cerr << "Quaternion " << k  << " " << _normalDistance[k] << std::endl;
     // std::cerr << 1.0f-std::tanh(3.0f*_normalDistance) << std::endl;
-    Eigen::Vector4f q0; 
-    q0 << 0.0f,0.0f,1.0f,0.0f;
+    // Eigen::Vector4f q0; 
+    // q0 << 0.0f,0.0f,1.0f,0.0f;
 
     // _qd = Utils::slerpQuaternion(q0,qf,1.0f-std::tanh(3.0f*_normalDistance));
     // _qd[k] = Utils::slerpQuaternion(q0,qf,Utils::smoothFall(_normalDistance[k],0.1f,0.6f));
-    _qd[k] = Utils::slerpQuaternion(_q[k],qf,Utils::smoothFall(_normalDistance[k],0.1f,0.6f));
+    // _qd[k] = Utils::slerpQuaternion(_q[k],qf,Utils::smoothFall(_normalDistance[k],0.1f,0.6f));
+    // _qd[k] = qf;
+
+    Eigen::Matrix3f Rd;
+    if(k == RIGHT)
+    {
+      Rd << -1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f,
+            0.0f, 1.0f, 0.0f;
+    }
+    else
+    {
+      Rd << -1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, -1.0f,
+            0.0f, -1.0f, 0.0f;
+    }
+
+    _qd[k] = Utils::rotationMatrixToQuaternion(Rd);
+
+    if(_q[k].dot(_qd[k])<0)
+    {
+      _qd[k] *=-1.0f;
+    }
 
     // Compute needed angular velocity to perform the desired quaternion
     Eigen::Vector4f qcurI, wq;
@@ -829,32 +948,46 @@ void FootControl::computeDesiredOrientation()
     qcurI.segment(1,3) = -_q[k].segment(1,3);
     wq = 5.0f*Utils::quaternionProduct(qcurI,_qd[k]-_q[k]);
     Eigen::Vector3f omegaTemp = _wRb[k]*wq.segment(1,3);
+    // std:cerr << "k: "<< k << " " <<_q[k].dot(_qd[k]) << " omega:  "<< _omegad[k].transpose() << std::endl;
     _omegad[k] = omegaTemp; 
   }
 }
 
 
-// void FootControl::logData()
-// {
-//   _outputFile << ros::Time::now() << " "
-//               << _x.transpose() << " "
-//               << _v.transpose() << " "
-//               << _fx.transpose() << " "
-//               << _vd.transpose() << " "
-//               << _e1.transpose() << " "
-//               << _wRb.col(2).transpose() << " "
-//               << (_markersPosition.col(P1)-_markersPosition.col(ROBOT_BASIS)).transpose() << " "
-//               << _normalDistance << " "
-//               << _normalForce << " "
-//               << _Fd << " "
-//               << _sequenceID << " "
-//               << _s << " " 
-//               << _alpha << " "
-//               << _beta << " "
-//               << _gamma << " "
-//               << _gammap << " "
-//               << _dW << " " << std::endl;
-// }
+void FootControl::logData()
+{
+  _outputFile << ros::Time::now() << " "
+              << _x[LEFT].transpose() << " "
+              << _vd[LEFT].transpose() << " "
+              << (_wRb[LEFT]*_filteredWrench[LEFT].segment(0,3)).transpose() << " "
+              << (_wRb[LEFT]*_filteredWrench[LEFT].segment(3,3)).transpose() << " "
+              << _x[RIGHT].transpose() << " "
+              << _vd[RIGHT].transpose() << " "
+              << (_wRb[RIGHT]*_filteredWrench[RIGHT].segment(0,3)).transpose() << " "
+              << (_wRb[RIGHT]*_filteredWrench[RIGHT].segment(3,3)).transpose() << " "
+              << _footPose[LEFT](0) << " "
+              << _footPose[LEFT](1) << " "
+              << _footPose[LEFT](3) << " "
+              << _footWrench[LEFT](0) << " "
+              << _footWrench[LEFT](1) << " "
+              << _footWrench[LEFT](3) << " "
+              << _desiredFootWrench[LEFT](0) << " "
+              << _desiredFootWrench[LEFT](1) << " "
+              << _desiredFootWrench[LEFT](3) << " "
+              << _footState[LEFT] << " "
+              << _footPose[RIGHT](0) << " "
+              << _footPose[RIGHT](1) << " "
+              << _footPose[RIGHT](3) << " "
+              << _footWrench[RIGHT](0) << " "
+              << _footWrench[RIGHT](1) << " "
+              << _footWrench[RIGHT](3) << " "
+              << _desiredFootWrench[RIGHT](0) << " "
+              << _desiredFootWrench[RIGHT](1) << " "
+              << _desiredFootWrench[RIGHT](3) << " "
+              << _footState[RIGHT] << " "
+              << _footSensor[RIGHT].transpose() << " "
+              << _filteredFootSensor[RIGHT].transpose() << std::endl;
+}
 
 
 void FootControl::publishData()
@@ -894,6 +1027,25 @@ void FootControl::publishData()
     std_msgs::Float32 msg;
     msg.data = _normalForce[k];
     _pubNormalForce[k].publish(msg); 
+
+    _msgFootSensor.header.frame_id = "world";
+    _msgFootSensor.header.stamp = ros::Time::now();
+    _msgFootSensor.wrench.force.x = _filteredFootSensor[k](0);
+    _msgFootSensor.wrench.force.y = _filteredFootSensor[k](1);
+    _msgFootSensor.wrench.force.z = _filteredFootSensor[k](2);
+    _msgFootSensor.wrench.torque.x = _filteredFootSensor[k](3);
+    _msgFootSensor.wrench.torque.y = _filteredFootSensor[k](4);
+    _msgFootSensor.wrench.torque.z = _filteredFootSensor[k](5);
+    _pubFootSensor[k].publish(_msgFootSensor);
+    
+    _msgFootInput.FxDes = _desiredFootWrench[k](0);
+    _msgFootInput.FyDes = _desiredFootWrench[k](1);
+    _msgFootInput.TphiDes = _desiredFootWrench[k](3);
+    _msgFootInput.TthetaDes = _desiredFootWrench[k](4);
+    _msgFootInput.TpsiDes = _desiredFootWrench[k](5);
+    _msgFootInput.stateDes = 2;
+    _pubFootInput[k].publish(_msgFootInput);
+
   }
 
   _msgMarker.header.frame_id = "world";
@@ -906,6 +1058,7 @@ void FootControl::publishData()
   _msgTaskAttractor.point.y = _taskAttractor(1);
   _msgTaskAttractor.point.z = _taskAttractor(2);
   _pubTaskAttractor.publish(_msgTaskAttractor);
+
 }
 
 
@@ -929,7 +1082,7 @@ void FootControl::updateRobotPose(const geometry_msgs::Pose::ConstPtr& msg, int 
   {
     _firstRobotPose[k] = true;
     _xd[k] = _x[k];
-    _x0[k] = _x[k];
+    // _x0[k] = _x[k];
     _qd[k] = _q[k];
     _vd[k].setConstant(0.0f);
   }
@@ -1039,22 +1192,64 @@ void FootControl::updateOptitrackPose(const geometry_msgs::PoseStamped::ConstPtr
 }
 
 
-void FootControl::updateFootInterfaceData(const geometry_msgs::PoseStamped::ConstPtr& msg, int k)
+void FootControl::updateFootInterfacePose(const geometry_msgs::PoseStamped::ConstPtr& msg, int k)
 {
 
   Eigen::Matrix<float,6,1> temp;
-  temp = _footData[k];
-  _footData[k] << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z, msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z;
+  temp = _footPose[k];
+  _footPose[k] << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z, msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z;
 
   if(_footInterfaceSequenceID[k]!=msg->header.seq)
   {
     _footInterfaceSequenceID[k] = msg->header.seq;
   }
 
-  if(!_firstFootInterfaceData[k])
+  if(!_firstFootInterfacePose[k])
   {
-    _firstFootInterfaceData[k] = true;
+    _firstFootInterfacePose[k] = true;
   }
+}
+
+
+void FootControl::updateFootInterfaceWrench(const geometry_msgs::WrenchStamped::ConstPtr& msg, int k)
+{
+
+  Eigen::Matrix<float,6,1> temp;
+  temp = _footPose[k];
+  _footWrench[k] << msg->wrench.force.x, msg->wrench.force.y, msg->wrench.force.z, msg->wrench.torque.x, msg->wrench.torque.y, msg->wrench.torque.z;
+
+  if(!_firstFootInterfaceWrench[k])
+  {
+    _firstFootInterfaceWrench[k] = true;
+  }
+}
+
+
+void FootControl::updateFootOutput(const custom_msgs::FootOutputMsg::ConstPtr& msg, int k)
+{
+
+  _footPose[k] << msg->x, msg->y,0.0f, msg->phi, msg->theta, msg->psi;
+  _footWrench[k] << msg->Fx, msg->Fy,0.0f, msg->Tphi, msg->Ttheta, msg->Tpsi;
+  _footState[k] = msg->state;
+
+  if(!_firstFootOutput[k])
+  {
+    _firstFootOutput[k] = true;
+  }
+}
+
+void FootControl::updateFootSensor(const geometry_msgs::Wrench::ConstPtr& msg, int k)
+{
+
+  _footSensor[k] << msg->force.x, msg->force.y ,msg->force.z, msg->torque.x, msg->torque.y, msg->torque.z;
+
+  if(!_firstFootSensor[k])
+  {
+    _firstFootSensor[k] = true;
+  }
+
+  _filteredFootSensor[k] = _filteredForceGain*_filteredFootSensor[k]+(1.0f-_filteredForceGain)*_footSensor[k];
+
 }
 
 
@@ -1081,5 +1276,7 @@ void FootControl::dynamicReconfigureCallback(robot_shared_control::footControl_p
   _offset(0) = config.xOffset;
   _offset(1) = config.yOffset;
   _offset(2) = config.zOffset;
+  _xyPositionMapping = config.xyPositionMapping;
+  _zPositionMapping = config.zPositionMapping;
 }
 

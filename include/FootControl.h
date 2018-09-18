@@ -21,6 +21,8 @@
 #include "visualization_msgs/Marker.h"
 #include <dynamic_reconfigure/server.h>
 #include "robot_shared_control/footControl_paramsConfig.h"
+#include "custom_msgs/FootInputMsg.h"
+#include "custom_msgs/FootOutputMsg.h"
 #include "Eigen/Eigen"
 #include "svm_grad.h"
 #include "sg_filter.h"
@@ -29,12 +31,12 @@
 #define AVERAGE_COUNT 100
 #define TOTAL_NB_MARKERS 6
 #define NB_ROBOTS 2
-#define FOOT_INTERFACE_X_RANGE_RIGHT 0.365
-#define FOOT_INTERFACE_Y_RANGE_RIGHT 0.295
-#define FOOT_INTERFACE_PHI_RANGE_RIGHT 40
-#define FOOT_INTERFACE_X_RANGE_LEFT 0.347
-#define FOOT_INTERFACE_Y_RANGE_LEFT 0.315
-#define FOOT_INTERFACE_PHI_RANGE_LEFT 40
+#define FOOT_INTERFACE_X_RANGE_RIGHT 0.350
+#define FOOT_INTERFACE_Y_RANGE_RIGHT 0.293
+#define FOOT_INTERFACE_PHI_RANGE_RIGHT 35
+#define FOOT_INTERFACE_X_RANGE_LEFT 0.350
+#define FOOT_INTERFACE_Y_RANGE_LEFT 0.293
+#define FOOT_INTERFACE_PHI_RANGE_LEFT 35
 
 class FootControl 
 {
@@ -58,7 +60,10 @@ class FootControl
 		ros::Subscriber _subForceTorqueSensor[NB_ROBOTS];								// force torque sensor
 		ros::Subscriber _subOptitrackPose[TOTAL_NB_MARKERS];	// optitrack markers pose
 		ros::Subscriber _subDampingMatrix[NB_ROBOTS];										// Damping matrix of DS-impedance controller
-		ros::Subscriber _subFootInterfaceData[NB_ROBOTS];
+		ros::Subscriber _subFootInterfacePose[NB_ROBOTS];
+		ros::Subscriber _subFootInterfaceWrench[NB_ROBOTS];
+		ros::Subscriber _subFootOutput[NB_ROBOTS];
+		ros::Subscriber _subFootSensor[NB_ROBOTS];
 
 		// Publisher declaration
 		ros::Publisher _pubDesiredTwist[NB_ROBOTS];						// Desired twist to DS-impdedance controller
@@ -67,6 +72,9 @@ class FootControl
 		ros::Publisher _pubTaskAttractor;						// Attractor on surface (RVIZ)
 		ros::Publisher _pubNormalForce[NB_ROBOTS];							// Measured normal force to the surface
     ros::Publisher _pubMarker;                          // Marker (RVIZ) 
+    ros::Publisher _pubDesiredFootWrench[NB_ROBOTS];                          // Marker (RVIZ) 
+    ros::Publisher _pubFootInput[NB_ROBOTS];                          // Marker (RVIZ) 
+    ros::Publisher _pubFootSensor[NB_ROBOTS];                          // Marker (RVIZ) 
 
 		
 		// Messages declaration
@@ -76,6 +84,9 @@ class FootControl
 		geometry_msgs::Twist _msgDesiredTwist;
 		geometry_msgs::PointStamped _msgTaskAttractor;
 		geometry_msgs::WrenchStamped _msgFilteredWrench;
+		geometry_msgs::Wrench _msgDesiredFootWrench;
+		geometry_msgs::WrenchStamped _msgFootSensor;
+		custom_msgs::FootInputMsg _msgFootInput;
     visualization_msgs::Marker _msgMarker;
 
 		
@@ -95,6 +106,7 @@ class FootControl
 		Eigen::Matrix<float,6,1> _wrench[NB_ROBOTS];						// Wrench [N and Nm] (6x1)
 		Eigen::Matrix<float,6,1> _wrenchBias[NB_ROBOTS];				// Wrench bias [N and Nm] (6x1)
 		Eigen::Matrix<float,6,1> _filteredWrench[NB_ROBOTS];		// Filtered wrench [N and Nm] (6x1)
+		Eigen::Matrix<float,6,1> _desiredFootWrench[NB_ROBOTS];		// Filtered wrench [N and Nm] (6x1)
     float _normalDistance[NB_ROBOTS];											// Normal distance to the surface [m]
     float _normalForce[NB_ROBOTS];													// Normal force to the surface [N]
 
@@ -118,11 +130,19 @@ class FootControl
     Eigen::Vector3f _xAttractor;  				
 
     // Foot interface variables
-    Eigen::Matrix<float,6,1> _footData[NB_ROBOTS];
+    Eigen::Matrix<float,6,1> _footPose[NB_ROBOTS];
+    Eigen::Matrix<float,6,1> _footSensor[NB_ROBOTS];
+    Eigen::Matrix<float,6,1> _footWrench[NB_ROBOTS];
+    Eigen::Matrix<float,6,1> _footDesiredWrench[NB_ROBOTS];
     Eigen::Vector3f _footPosition[NB_ROBOTS];
     uint32_t _footInterfaceSequenceID[NB_ROBOTS];
     Eigen::Vector3f _vm[NB_ROBOTS];
     Eigen::Vector3f _xh[NB_ROBOTS];
+    float _xyPositionMapping;
+    float _zPositionMapping;
+    int _footState[NB_ROBOTS];
+		Eigen::Matrix<float,6,1> _filteredFootSensor[NB_ROBOTS];		// Filtered wrench [N and Nm] (6x1)
+
 
     // Object variables
     Eigen::Vector3f _objectDim;       // Object dimensions [m] (3x1)
@@ -141,9 +161,6 @@ class FootControl
     bool _objectGrasped;                                // Check if the object is grasped
 
 
-
-
-
     // Booleans
 		bool _firstRobotPose[NB_ROBOTS];																// Monitor the first robot pose update
 		bool _firstRobotTwist[NB_ROBOTS];															// Monitor the first robot twist update
@@ -153,7 +170,10 @@ class FootControl
 		bool _optitrackOK;																	// Check if all markers position is received
 		bool _wrenchBiasOK[NB_ROBOTS];																	// Check if computation of force/torque sensor bias is OK
 		bool _stop;																					// Check for CTRL+C
-		bool _firstFootInterfaceData[NB_ROBOTS];
+		bool _firstFootInterfacePose[NB_ROBOTS];
+		bool _firstFootInterfaceWrench[NB_ROBOTS];
+		bool _firstFootOutput[NB_ROBOTS];
+		bool _firstFootSensor[NB_ROBOTS];
 		bool _firstObjectPose;
 
     // Optitrack variables
@@ -193,7 +213,7 @@ class FootControl
 		Eigen::Matrix3f _D[NB_ROBOTS];
 		float _d1[NB_ROBOTS];
 		uint32_t _sequenceID;
-		std::string _fileName;
+		std::string _filename;
 		std::ifstream _inputFile;
 		std::ofstream _outputFile;
 		SVMGrad _svm;
@@ -207,7 +227,7 @@ class FootControl
 	public:
 
 		// Class constructor
-		FootControl(ros::NodeHandle &n, double frequency);
+		FootControl(ros::NodeHandle &n, double frequency, std::string filename);
 
 		// Initialize node
 		bool init();
@@ -231,6 +251,8 @@ class FootControl
 
     void positionPositionMapping();
 
+  	void computeDesiredFootWrench();
+
     // Update surface info (normal vector and distance)
 		// void updateSurfaceInformation();
 
@@ -250,7 +272,7 @@ class FootControl
 		void computeDesiredOrientation();
     
   	// Log data to text file
-    // void logData();
+    void logData();
 
     // Publish data to topics
     void publishData();
@@ -274,7 +296,14 @@ class FootControl
 		void updateOptitrackPose(const geometry_msgs::PoseStamped::ConstPtr& msg, int k); 
 
     // Callback to update data from foot interface
-		void updateFootInterfaceData(const geometry_msgs::PoseStamped::ConstPtr& msg, int k); 
+		void updateFootInterfacePose(const geometry_msgs::PoseStamped::ConstPtr& msg, int k); 
+
+    // Callback to update data from foot interface
+		void updateFootInterfaceWrench(const geometry_msgs::WrenchStamped::ConstPtr& msg, int k); 
+
+		void updateFootOutput(const custom_msgs::FootOutputMsg::ConstPtr& msg, int k); 
+
+		void updateFootSensor(const geometry_msgs::Wrench::ConstPtr& msg, int k);
 
 		// Check if the marker is tracked
 		uint16_t checkTrackedMarker(float a, float b);
