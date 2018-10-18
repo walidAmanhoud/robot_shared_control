@@ -24,8 +24,6 @@
 #include <dynamic_reconfigure/server.h>
 #include "robot_shared_control/falconControl_paramsConfig.h"
 #include "Eigen/Eigen"
-#include "svm_grad.h"
-#include "sg_filter.h"
 
 #define NB_SAMPLES 50
 #define AVERAGE_COUNT 100
@@ -34,7 +32,7 @@
 #define FALCON_INTERFACE_X_RANGE 0.1
 #define FALCON_INTERFACE_Y_RANGE 0.1
 #define FALCON_INTERFACE_Z_RANGE 0.1
-#define NB_TASKS 3
+#define NB_TASKS 4
 
 class FalconControl 
 {
@@ -125,6 +123,7 @@ class FalconControl
    	float _dFalcon; 
    	uint32_t _buttonsFalcon;
     float _sigmaH;
+    float _bs = 0.0f;
 
 
    	// Task adaptation parameters
@@ -138,9 +137,6 @@ class FalconControl
     Eigen::Vector3f _objectDim;       // Object dimensions [m] (3x1)
     Eigen::Vector3f _xoC;             // Measured object center position [m] (3x1)
     Eigen::Vector3f _xoD;             // Measured object dimension vector [m] (3x1)
-    SGF::SavitzkyGolayFilter _xCFilter;
-    SGF::SavitzkyGolayFilter _xDFilter;
-    SGF::SavitzkyGolayFilter _zDirFilter;
 
     // Booleans
 		bool _firstRobotPose;																// Monitor the first robot pose update
@@ -183,7 +179,17 @@ class FalconControl
 		float _filteredForceGain;		// Filtering gain for force/torque sensor
     Eigen::Vector3f _offset;		// Attractor offset on surface [m] (3x1)
     double _duration;						// Duration of an experiment [s]
-		
+
+    // Force adaptation vaariable
+    float _E;
+    float _Et;
+    float _Emin;
+    float _Emax;
+    float _epsilon;
+    float _sigma;
+    float _h;
+    float _tankRate;
+
 		// Other variables
     double _timeInit;
 		uint32_t _averageCount = 0;
@@ -191,10 +197,9 @@ class FalconControl
 		Eigen::Matrix3f _D;
 		float _d1;
 		uint32_t _sequenceID;
-		std::string _fileName;
+		std::string _filename;
 		std::ifstream _inputFile;
 		std::ofstream _outputFile;
-		SVMGrad _svm;
 		std::mutex _mutex;
 		static FalconControl* me;
 
@@ -205,7 +210,7 @@ class FalconControl
 	public:
 
 		// Class constructor
-		FalconControl(ros::NodeHandle &n, double frequency);
+		FalconControl(ros::NodeHandle &n, double frequency, std::string filename);
 
 		// Initialize node
 		bool init();
@@ -225,9 +230,11 @@ class FalconControl
 
     void taskAdaptation();
 
+    void forceAdaptation();
+
     void falconDataTransformation();
 
-    void rateControllerStep();
+    void positionVelocityMapping();
 
     void computeFalconForce();
 
@@ -252,7 +259,7 @@ class FalconControl
 		void computeDesiredOrientation();
     
   	// Log data to text file
-    // void logData();
+    void logData();
 
     // Publish data to topics
     void publishData();

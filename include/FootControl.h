@@ -37,6 +37,8 @@
 #define FOOT_INTERFACE_X_RANGE_LEFT 0.350
 #define FOOT_INTERFACE_Y_RANGE_LEFT 0.293
 #define FOOT_INTERFACE_PHI_RANGE_LEFT 35
+#define NB_TASKS 3
+
 
 class FootControl 
 {
@@ -127,16 +129,16 @@ class FootControl
     Eigen::Vector3f _p;										// Point on the surface [m] (3x1)
     Eigen::Vector3f _xProj;								// Vertical projection on the surface [m] (3x1)
     Eigen::Matrix3f _wRs;									// Orientation matrix from surface frame to world frame
-    Eigen::Vector3f _xAttractor;  				
 
     // Foot interface variables
     Eigen::Matrix<float,6,1> _footPose[NB_ROBOTS];
     Eigen::Matrix<float,6,1> _footSensor[NB_ROBOTS];
     Eigen::Matrix<float,6,1> _footWrench[NB_ROBOTS];
+    Eigen::Matrix<float,6,1> _footTwist[NB_ROBOTS];
     Eigen::Matrix<float,6,1> _footDesiredWrench[NB_ROBOTS];
     Eigen::Vector3f _footPosition[NB_ROBOTS];
     uint32_t _footInterfaceSequenceID[NB_ROBOTS];
-    Eigen::Vector3f _vm[NB_ROBOTS];
+    Eigen::Vector3f _vh[NB_ROBOTS];
     Eigen::Vector3f _xh[NB_ROBOTS];
     float _xyPositionMapping;
     float _zPositionMapping;
@@ -162,6 +164,8 @@ class FootControl
 
 
     // Booleans
+    bool _useLeftRobot;
+    bool _useRightRobot;
 		bool _firstRobotPose[NB_ROBOTS];																// Monitor the first robot pose update
 		bool _firstRobotTwist[NB_ROBOTS];															// Monitor the first robot twist update
 		bool _firstWrenchReceived[NB_ROBOTS];													// Monitor first force/torque data update
@@ -187,6 +191,12 @@ class FootControl
 		Eigen::Vector3f _p4;																						// Fourth marker position in the robot frame
     Eigen::Vector3f _leftRobotOrigin;                               // Left robot basis position in the right robot frame
 
+    Eigen::Vector3f _xAttractor[NB_TASKS];  				
+   	Eigen::Matrix<float,NB_TASKS,1> _beliefs;
+   	Eigen::Matrix<float,NB_TASKS,1> _dbeliefs;   	
+   	Eigen::Vector3f _fxk[NB_TASKS];
+   	float _Fdk[NB_TASKS];
+   	float _adaptationRate;
 
 		// Tank parameters
 		float _s;					// Current tank level
@@ -203,9 +213,11 @@ class FootControl
 		// User variables
 		float _velocityLimit;				// Velocity limit [m/s]
 		float _filteredForceGain;		// Filtering gain for force/torque sensor
-    Eigen::Vector3f _offset;		// Attractor offset on surface [m] (3x1)
     double _duration;						// Duration of an experiment [s]
-		
+		float _kxy;		
+		float _dxy;		
+		float _kphi;		
+		float _dphi;		
 		// Other variables
     double _timeInit;
 		uint32_t _averageCount = 0;
@@ -240,10 +252,17 @@ class FootControl
 		// Callback called when CTRL is detected to stop the node
 		static void stopNode(int sig);
 
+		bool allDataReceived();
+
 		void computeObjectPose();
 		
 		// Compute command to be sent to the DS-impedance controller
     void computeCommand();
+
+    void updateIndividualTasks();
+    
+    void taskAdaptation();
+    
 
     void footDataTransformation();
 

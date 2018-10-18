@@ -14,6 +14,9 @@ FootControl::FootControl(ros::NodeHandle &n, double frequency, std::string filen
 {
   me = this;
 
+  _useLeftRobot = true;
+  _useRightRobot = true;
+
   _gravity << 0.0f, 0.0f, -9.80665f;
   _toolComPositionFromSensor << 0.0f,0.0f,0.02f;
   _toolOffsetFromEE = 0.13f;
@@ -42,6 +45,7 @@ FootControl::FootControl(ros::NodeHandle &n, double frequency, std::string filen
     _normalForce[k] = 0.0f;
     _normalDistance[k] = 0.0f;
     _Fd[k] = 0.0f;
+    _e1[k] << 0.0f, 0.0f, -1.0f;
 
     _firstRobotPose[k] = false;
     _firstRobotTwist[k] = false;
@@ -54,9 +58,10 @@ FootControl::FootControl(ros::NodeHandle &n, double frequency, std::string filen
 
     _footPose[k].setConstant(0.0f);
     _footWrench[k].setConstant(0.0f);
+    _footTwist[k].setConstant(0.0f);
     _footDesiredWrench[k].setConstant(0.0f);
     _footPosition[k].setConstant(0.0f);
-    _vm[k].setConstant(0.0f);
+    _vh[k].setConstant(0.0f);
     _footSensor[k].setConstant(0.0f);
     _footInterfaceSequenceID[k] = 0;    
     _firstFootInterfacePose[k] = false;
@@ -90,6 +95,24 @@ FootControl::FootControl(ros::NodeHandle &n, double frequency, std::string filen
   _averageCount = 0;
 
   _velocityLimit = 0.0f;
+
+  _kxy = 0.0f;
+  _dxy = 0.0f;
+  _kphi = 0.0f;
+  _dphi = 0.0f;
+
+  _xAttractor[0] << -0.8, 0.4f,0.4f;
+  _xAttractor[0] << -0.7, 0.0f,0.10f;
+  _xAttractor[1] << -0.7, -0.5f,0.4f;
+  _xAttractor[2] << -0.7, 0.0f,0.6f;
+  _beliefs.setConstant(0.0f);
+  _dbeliefs.setConstant(0.0f);
+  for(int k = 0; k < NB_TASKS; k++)
+  {
+    _fxk[k].setConstant(0.0f);
+  }
+  _beliefs(2) = 1.0f;
+  _adaptationRate = 100.0f;
 
   _msgMarker.header.frame_id = "world";
   _msgMarker.header.stamp = ros::Time();
@@ -148,17 +171,12 @@ bool FootControl::init()
   _subOptitrackPose[P3] = _n.subscribe<geometry_msgs::PoseStamped>("/optitrack/p3/pose", 1, boost::bind(&FootControl::updateOptitrackPose,this,_1,P3),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
   _subOptitrackPose[P4] = _n.subscribe<geometry_msgs::PoseStamped>("/optitrack/p4/pose", 1, boost::bind(&FootControl::updateOptitrackPose,this,_1,P4),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
   
-  // _subFootInterfacePose[RIGHT] = _n.subscribe<geometry_msgs::PoseStamped>("/FI_Pose/1",1, boost::bind(&FootControl::updateFootInterfacePose,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
-  // _subFootInterfacePose[LEFT] = _n.subscribe<geometry_msgs::PoseStamped>("/FI_Pose/2",1, boost::bind(&FootControl::updateFootInterfacePose,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
-
-  // _subFootInterfaceWrench[RIGHT] = _n.subscribe<geometry_msgs::WrenchStamped>("/FI_Wrench/1",1, boost::bind(&FootControl::updateFootInterfaceWrench,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
-  // _subFootInterfaceWrench[LEFT] = _n.subscribe<geometry_msgs::WrenchStamped>("/FI_Wrench/2",1, boost::bind(&FootControl::updateFootInterfaceWrench,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
-
-  _subFootOutput[RIGHT] = _n.subscribe<custom_msgs::FootOutputMsg>("/FI_Output/1",1, boost::bind(&FootControl::updateFootOutput,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
-  _subFootOutput[LEFT] = _n.subscribe<custom_msgs::FootOutputMsg>("/FI_Output/2",1, boost::bind(&FootControl::updateFootOutput,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+  _subFootOutput[RIGHT] = _n.subscribe<custom_msgs::FootOutputMsg>("/FI_Output/Right",1, boost::bind(&FootControl::updateFootOutput,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+  _subFootOutput[LEFT] = _n.subscribe<custom_msgs::FootOutputMsg>("/FI_Output/Left",1, boost::bind(&FootControl::updateFootOutput,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
 
   _subFootSensor[RIGHT] = _n.subscribe<geometry_msgs::Wrench>("/FI_FFeedback/1",1, boost::bind(&FootControl::updateFootSensor,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
   _subFootSensor[LEFT] = _n.subscribe<geometry_msgs::Wrench>("/FI_FFeedback/2",1, boost::bind(&FootControl::updateFootSensor,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+ 
   // Publisher definitions
   _pubDesiredTwist[RIGHT] = _n.advertise<geometry_msgs::Twist>("/lwr/joint_controllers/passive_ds_command_vel", 1);
   _pubDesiredOrientation[RIGHT] = _n.advertise<geometry_msgs::Quaternion>("/lwr/joint_controllers/passive_ds_command_orient", 1);
@@ -174,16 +192,11 @@ bool FootControl::init()
 
   _pubMarker = _n.advertise<visualization_msgs::Marker>("FootControl/cube", 1);
 
-  // _pubDesiredFootWrench[RIGHT] = _n.advertise<geometry_msgs::Wrench>("/FI_setWrench/1", 1);
-  // _pubDesiredFootWrench[LEFT] = _n.advertise<geometry_msgs::Wrench>("/FI_setWrench/2", 1);
-
-  _pubFootInput[RIGHT] = _n.advertise<custom_msgs::FootInputMsg>("/FI_Input/1", 1);
-  _pubFootInput[LEFT] = _n.advertise<custom_msgs::FootInputMsg>("/FI_Input/2", 1);
+  _pubFootInput[RIGHT] = _n.advertise<custom_msgs::FootInputMsg>("/FI_Input/Right", 1);
+  _pubFootInput[LEFT] = _n.advertise<custom_msgs::FootInputMsg>("/FI_Input/Left", 1);
 
   _pubFootSensor[RIGHT] = _n.advertise<geometry_msgs::WrenchStamped>("/FootControl/filteredFootSensorRight", 1);
   _pubFootSensor[LEFT] = _n.advertise<geometry_msgs::WrenchStamped>("/FootControl/filteredFootSensorLeft", 1);
-
-
 
 
   // Dynamic reconfigure definition
@@ -194,17 +207,18 @@ bool FootControl::init()
 
   _outputFile.open(ros::package::getPath(std::string("robot_shared_control"))+"/data_foot/"+_filename+".txt");
 
-  if(!_n.getParamCached("/lwr/ds_param/damping_eigval0",_d1[RIGHT]))
+  if(!_n.getParamCached("/lwr/ds_param/damping_eigval0",_d1[RIGHT]) && _useRightRobot)
   {
     ROS_ERROR("[FootControl]: Cannot read first eigen value of passive ds controller for right robot");
     return false;
   }
 
-  // if(!_n.getParamCached("/lwr2/ds_param/damping_eigval0",_d1[LEFT]))
-  // {
-  //   ROS_ERROR("[FootControl]: Cannot read first eigen value of passive ds controller for left robot");
-  //   return false;
-  // }
+  if(!_n.getParamCached("/lwr2/ds_param/damping_eigval0",_d1[LEFT]) && _useLeftRobot)
+  {
+    ROS_ERROR("[FootControl]: Cannot read first eigen value of passive ds controller for left robot");
+    return false;
+  }
+
   if (_n.ok()) 
   { 
     // Wait for poses being published
@@ -226,18 +240,7 @@ void FootControl::run()
 
   while (!_stop) 
   {
-    // std::cerr << (int) _firstRobotPose << " " << (int) _firstRobotTwist << " " << (int) _firstFootInterfacePose << std::endl;
-    // std::cerr << _firstOptitrackPose[ROBOT_BASIS_LEFT] << _firstOptitrackPose[ROBOT_BASIS_RIGHT] << _firstOptitrackPose[P1] <<
-       // _firstOptitrackPose[P2] << _firstOptitrackPose[P3] << _firstOptitrackPose[P4] << _firstDampingMatrix << _firstFootInterfacePose<<std::endl;
-    // if(_firstRobotPose[RIGHT] && _firstRobotPose[LEFT] && _firstRobotTwist[RIGHT] && _firstRobotTwist[LEFT] &&
-    //    _wrenchBiasOK[RIGHT] && _wrenchBiasOK[LEFT] && _firstDampingMatrix[RIGHT] && _firstDampingMatrix[LEFT] &&
-    //    _firstOptitrackPose[ROBOT_BASIS_LEFT] && _firstOptitrackPose[ROBOT_BASIS_RIGHT] && _firstOptitrackPose[P1] &&
-    //    _firstOptitrackPose[P2] && _firstOptitrackPose[P3] && _firstOptitrackPose[P4] &&
-    //    _firstFootInterfacePose[LEFT] && _firstFootInterfacePose[RIGHT] && _firstFootInterfaceWrench[LEFT] && _firstFootInterfaceWrench[RIGHT])
-    // std::cerr << (int) _firstRobotPose[RIGHT] << (int) _firstRobotTwist[RIGHT] << (int) _wrenchBiasOK[RIGHT] << (int) _firstDampingMatrix[RIGHT] << (int) _firstFootInterfacePose[RIGHT] << std::endl;
-    if(_firstRobotPose[RIGHT] && _firstRobotTwist[RIGHT] && _wrenchBiasOK[RIGHT] && _firstDampingMatrix[RIGHT] && _firstFootOutput[RIGHT] && 
-       _firstRobotPose[RIGHT] && _firstRobotTwist[RIGHT] && _wrenchBiasOK[LEFT] && _firstFootOutput[LEFT] 
-        && _firstFootSensor[RIGHT])
+    if(allDataReceived())
     {
       _mutex.lock();
 
@@ -248,13 +251,12 @@ void FootControl::run()
       // Initialize optitrack
       if(!_optitrackOK)
       {
-        optitrackInitialization();
+        // optitrackInitialization();
       }
       else
       {
-
         // Compute object pose
-        computeObjectPose();
+        // computeObjectPose();
 
         if(_firstObjectPose)
         {
@@ -295,6 +297,26 @@ void FootControl::run()
   ros::shutdown();
 }
 
+bool FootControl::allDataReceived()
+{
+  if(_useLeftRobot && _useRightRobot)
+  {
+    return (_firstRobotPose[RIGHT] && _firstRobotTwist[RIGHT] && _wrenchBiasOK[RIGHT] && _firstDampingMatrix[RIGHT] && _firstFootOutput[RIGHT] &&
+            _firstRobotPose[LEFT] && _firstRobotTwist[LEFT] && _wrenchBiasOK[LEFT] && _firstDampingMatrix[LEFT] && _firstFootOutput[LEFT]);
+  }
+  else if(_useLeftRobot)
+  {
+    return (_firstRobotPose[LEFT] && _firstRobotTwist[LEFT] && _wrenchBiasOK[LEFT] && _firstDampingMatrix[LEFT] && _firstFootOutput[LEFT]);
+  }
+  else if(_useRightRobot)
+  {
+    return (_firstRobotPose[RIGHT] && _firstRobotTwist[RIGHT] && _wrenchBiasOK[RIGHT] && _firstDampingMatrix[RIGHT] && _firstFootOutput[RIGHT]);
+  }
+  else
+  {
+    return false;
+  }
+}
 
 void FootControl::stopNode(int sig)
 {
@@ -302,178 +324,142 @@ void FootControl::stopNode(int sig)
 }
 
 
-void FootControl::computeObjectPose()
-{
-  // Check if all markers on the object are tracked
-  // The four markers are positioned on the corner of the upper face:
-  // P2 ----- P3
-  // |        |
-  // |        |
-  // P1 ----- P4
-  if(_markersTracked.segment(NB_ROBOTS,TOTAL_NB_MARKERS-NB_ROBOTS).sum() == TOTAL_NB_MARKERS-NB_ROBOTS)
-  {
-
-    if(!_firstObjectPose)
-    {
-      _firstObjectPose = true;
-    }
-
-    // Compute markers position in the right robot frame
-    _p1 = _markersPosition.col(P1)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
-    _p2 = _markersPosition.col(P2)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
-    _p3 = _markersPosition.col(P3)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
-    _p4 = _markersPosition.col(P4)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
-
-    // Compute object center position
-    _xoC = (_p1+_p2+_p3+_p4)/4.0f;
-    // Compute object dimension vector
-    // The dimension obtained from the markers is adjusted to match the real
-    // object dimension
-    _xoD = (_p3+_p4-_p1-_p2)/2.0f;
-    _xoD = 0.20f*_xoD.normalized(); 
-
-    // Filter center position and dimension vector of the object
-    SGF::Vec temp(3);
-    _xCFilter.AddData(_xoC);
-    _xCFilter.GetOutput(0,temp);
-    _xoC = temp;
-    Eigen::Vector3f xDir = _p2-_p1;
-    xDir.normalize();
-    Eigen::Vector3f yDir = _p1-_p4;
-    yDir.normalize();
-    Eigen::Vector3f zDir = xDir.cross(yDir);
-    zDir.normalize();
-    _zDirFilter.AddData(xDir.cross(yDir));
-    _zDirFilter.GetOutput(0,temp);
-    zDir = temp;
-    zDir.normalize();   
-    _xoC -= 1.0f*(_objectDim(2)/2.0f)*zDir;
-      
-    // Filter object direction
-    _xDFilter.AddData(_xoD);
-    _xDFilter.GetOutput(0,temp);
-    _xoD = 0.20f*temp.normalized();
-
-    // std::cerr <<"real" << _xdD.norm() << " " <<_xdD.transpose() << std::endl;
-    // std::cerr << "filter" <<  _xoD.norm() << " " <<_xoD.transpose() << std::endl;
-
-    _msgMarker.pose.position.x = _xoC(0);
-    _msgMarker.pose.position.y = _xoC(1);
-    _msgMarker.pose.position.z = _xoC(2);
-    Eigen::Matrix3f R;
-    R.col(0) = xDir;
-    R.col(1) = yDir;
-    R.col(2) = zDir;
-    Eigen::Vector4f q = Utils::rotationMatrixToQuaternion(R);
-    _msgMarker.pose.orientation.x = q(1);
-    _msgMarker.pose.orientation.y = q(2);
-    _msgMarker.pose.orientation.z = q(3);
-    _msgMarker.pose.orientation.w = q(0);
-
-  }
-
-}
-
-
 void FootControl::computeCommand()
 {
-
-  // Compute robots center + distance vector;
-  _xC = (_x[LEFT]+_x[RIGHT])/2.0f;
-  _xD = (_x[RIGHT]-_x[LEFT]);
-
-  // Compute errors to object center position and dimension vector 
-  _eoD = (_xD-_xoD).dot(_xoD.normalized());
-  _eoC = (_xoC-_xC).norm();
-
-  float alpha = Utils::smoothFall(_eoD,0.02f,0.1f)*Utils::smoothFall(_eoC,0.1f,0.2f); 
-  if(_normalForce[LEFT]*alpha>_graspingForceThreshold && _normalForce[RIGHT]*alpha>_graspingForceThreshold)
-  {
-    _objectGrasped = true;
-  }
-  else
-  {
-    _objectGrasped = false;
-  }
-
-  if(_objectGrasped) // Object reachable and grasped
-  {
-  }
-  else // Object reachable but not grasped
-  {
-    _xdD = _xoD;
-  }
-
-  _xdD << 0.0f,-1.0f,0.0f;
-  _xdD *= 0.20f;
-  // std::cerr << "Object grasped: " << (int) _objectGrasped << " alpha: " << alpha <<std::endl;
-
-  _e1[LEFT] = _xdD.normalized();
-  _e1[RIGHT] = -_xdD.normalized();
-
   footDataTransformation();
 
   positionPositionMapping();
 
   positionVelocityMapping();
 
-  computeDesiredFootWrench();
+  // updateIndividualTasks();
 
-  std::cerr << _footSensor[RIGHT].segment(0,3).transpose() << std::endl;
+  // taskAdaptation();
+
+  Eigen::MatrixXf::Index indexMax;
+  if(fabs(1.0f-_beliefs.array().maxCoeff(&indexMax))<FLT_EPSILON)
+  {
+    _Fd[RIGHT] = _Fdk[indexMax];
+    //  if(_buttonsFalcon == (int) CENTER)
+    //  {
+    //   _sigmaH += 5.0f*_dt*_vM.dot(_e1);
+    //   if(_sigmaH>1)
+    //   {
+    //     _sigmaH = 1.0f;
+    //   }
+    //   else if(_sigmaH<0.0f)
+    //   {
+    //     _sigmaH = 0.0f;
+    //   }
+    // }
+    // _Fd*=(1+_sigmaH);
+  }
+  else
+  {
+    _Fd[RIGHT] = 0.0f;
+    // _sigmaH = 0.0f;
+  }
 
   for(int k = 0; k < NB_ROBOTS; k++)
   {
-    // _normalForce[k] = fabs((_wRb[k]*_filteredWrench[k].segment(0,3)).dot(_e1[k]));
-
-    // if(_d1[k]<1.0f)
-    // {
-    //   _d1[k] = 1.0f;
-    // }
-
-    // if(_objectGrasped)
-    // {
-    //   _Fd[k] = _targetForce;
-    // }
-    // else
-    // {
-    //   _Fd[k] = _targetForce*alpha;    
-    // }
-
-    // if(_e1[LEFT].dot(_vm[LEFT])<0 && _e1[RIGHT].dot(_vm[RIGHT])<0)
-    // {
-    //   _Fd[k] = 0.0f;
-    // }
-
-    // _fx[k] = _vm[k];
-    // _vd[k] = _vm[k];
-    // _vd[k] = _vm[k]+(_Fd[k]/_d1[k])*_e1[k];
-    // _vd[k].setConstant(0.0f);
     _vd[k] = _x0[k]+_xh[k]-_x[k];
-    // _vd[k].setConstant(0.0f);
 
     if(_vd[k].norm()>0.3f)
     {
       _vd[k] *= 0.3f/_vd[k].norm();
     }    
-    // std::cerr << "vd " << k << " : " <<_vd[k].transpose() << " " << _vd[k].norm() << std::endl;
   }
 
-
-  // // Update surface info
-  // updateSurfaceInformation();
-
-  // // Compute nominal DS
-  // computeNominalDS();
-
-  // // Compute modulated DS
   // computeModulatedDS();
-    
-  computeDesiredOrientation();
-  // _qd[0] << 0.0f,0.0f,1.0f,0.0f;
-  // _qd[1] << 0.0f,0.0f,1.0f,0.0f;
 
-  // // Compute desired orientation
+  computeDesiredOrientation();
+
+  computeDesiredFootWrench();
 }
+
+void FootControl::updateIndividualTasks()
+{
+  for(int k = 0; k < NB_TASKS; k++)
+  {
+    _fxk[k] = _xAttractor[k]-_x[RIGHT];
+    _Fdk[k] = 0.0f;
+  }
+
+  Eigen::Vector3f F = _filteredWrench[RIGHT].segment(0,3);
+  _normalForce[RIGHT] = _e1[RIGHT].dot(-_wRb[RIGHT]*F);
+    // Compute desired force profile
+  if(_normalForce[RIGHT]<3.0f)
+  {
+    _Fdk[0] = 5.0f;
+  }
+  else
+  {
+    _Fdk[0] = _targetForce;
+  }
+
+}
+
+void FootControl::taskAdaptation()
+{
+  _fx[RIGHT].setConstant(0.0f);
+  for(int k = 0; k < NB_TASKS; k++)
+  {
+    _fx[RIGHT]+=_beliefs[k]*_fxk[k];
+  }
+
+  for(int k = 0; k < NB_TASKS; k++)
+  {
+    _dbeliefs[k] = _adaptationRate*((_vh[RIGHT]-_fx[RIGHT]).dot(_fxk[k])+(_beliefs[k]-0.5f)*_fxk[k].squaredNorm());
+    std::cerr << k << " " << (_vh[RIGHT]-_fx[RIGHT]).dot(_fxk[k]) << " " << (_beliefs[k]-0.5f)*_fxk[k].squaredNorm() <<std::endl;
+  }
+
+  Eigen::MatrixXf::Index indexMax;
+  float bmax = _dbeliefs.array().maxCoeff(&indexMax);
+  if(fabs(1.0f-bmax)< FLT_EPSILON)
+  {
+    _dbeliefs(indexMax) = 0.0f;
+  }
+
+  Eigen::Matrix<float,NB_TASKS-1,1> temp;
+  int m = 0;
+  for(int k = 0; k < NB_TASKS; k++)
+  {
+    if(k!=indexMax)
+    {
+      temp[m] = _dbeliefs[k];
+      m++;
+    }
+  }
+  float b2max = temp.array().maxCoeff();
+  float z = (bmax+b2max)/2.0f;
+  _dbeliefs.array() -= z;
+
+  float S = 0.0f;
+  for(int k = 0; k < NB_TASKS; k++)
+  {
+    if(fabs(_beliefs[k])>FLT_EPSILON || _dbeliefs[k] > 0)
+    {
+      S+=_dbeliefs[k];
+    }
+  }
+  _dbeliefs[indexMax]-=S;
+  _beliefs+=_dt*_dbeliefs;
+  for(int k = 0; k < NB_TASKS; k++)
+  {
+    if(_beliefs[k]< 0.0f)
+    {
+      _beliefs[k] = 0.0f;
+    }
+    else if(_beliefs[k] > 1.0f)
+    {
+      _beliefs[k] = 1.0f;
+    }
+  }
+
+  std::cerr << "dBeliefs: " << _dbeliefs.transpose() << std::endl;
+  std::cerr << "beliefs: " << _beliefs.transpose() << std::endl;
+}
+
 
 
 void FootControl::footDataTransformation()
@@ -488,6 +474,7 @@ void FootControl::footDataTransformation()
   // std::cerr << "Before transformation: " <<_footPose.segment(0,4).transpose() << std::endl;
   // std::cerr << "After transformation: " << _footPosition.transpose() << std::endl;
 }
+
 
 void FootControl::positionPositionMapping()
 {
@@ -506,19 +493,19 @@ void FootControl::positionPositionMapping()
 void FootControl::positionVelocityMapping()
 {
 
-  _velocityLimit = 0.25f;
+  _velocityLimit = 0.3f;
   Eigen::Vector3f gains[NB_ROBOTS];
   gains[RIGHT] << 2.0f*_velocityLimit/FOOT_INTERFACE_Y_RANGE_RIGHT, 2.0f*_velocityLimit/FOOT_INTERFACE_X_RANGE_RIGHT, 2.0f*_velocityLimit/FOOT_INTERFACE_PHI_RANGE_RIGHT;
   gains[LEFT] << 2.0f*_velocityLimit/FOOT_INTERFACE_Y_RANGE_LEFT, 2.0f*_velocityLimit/FOOT_INTERFACE_X_RANGE_LEFT, 2.0f*_velocityLimit/FOOT_INTERFACE_PHI_RANGE_LEFT;
   
   for(int k = 0; k < NB_ROBOTS; k++)
   {
-    _vm[k] = gains[k].cwiseProduct(_footPosition[k]);
-    if(_vm[k].norm()>_velocityLimit)
+    _vh[k] = gains[k].cwiseProduct(_footPosition[k]);
+    if(_vh[k].norm()>_velocityLimit)
     {
-      _vm[k] *= _velocityLimit/_vm[k].norm();
+      _vh[k] *= _velocityLimit/_vh[k].norm();
     }    
-    // std::cerr << "Master velocity " << k << " : " <<_vm[k].transpose() << std::endl;
+    // std::cerr << "Master velocity " << k << " : " <<_vh[k].transpose() << std::endl;
   }
 }
 
@@ -527,9 +514,14 @@ void FootControl::computeDesiredFootWrench()
 {
   Eigen::Vector3f temp;
   temp = _wRb[RIGHT]*_filteredWrench[RIGHT].segment(0,3);
+
+  // temp.setConstant(0.0f);
   _desiredFootWrench[RIGHT](1) = temp(0);
   _desiredFootWrench[RIGHT](0) = -temp(1);
   _desiredFootWrench[RIGHT](3) = temp(2)*0.205/5;
+  // _desiredFootWrench[RIGHT](0) += -_kxy*_footPose[RIGHT](0)-_dxy*_footTwist[RIGHT](0);
+  // _desiredFootWrench[RIGHT](1) += -_kxy*_footPose[RIGHT](1)-_dxy*_footTwist[RIGHT](1);
+  // _desiredFootWrench[RIGHT](3) += -_kphi*_footPose[RIGHT](3)-_dphi*_footTwist[RIGHT](3);
 
   temp = _wRb[LEFT]*_filteredWrench[LEFT].segment(0,3);
   _desiredFootWrench[LEFT](1) = temp(0);
@@ -579,229 +571,6 @@ void FootControl::computeDesiredFootWrench()
 
   }
 }
-// void FootControl::updateSurfaceInformation()
-// {
-//   switch(_surfaceType)
-//   {
-//     case PLANAR:
-//     {
-//       // Compute markers position in the robot frame
-//       // The three markers are positioned on the surface to form an angle of 90 deg:
-//       // P1 ----- P2
-//       // |       
-//       // |
-//       // P3
-//       _p1 = _markersPosition.col(P1)-_markersPosition0.col(ROBOT_BASIS);
-//       _p2 = _markersPosition.col(P2)-_markersPosition0.col(ROBOT_BASIS);
-//       _p3 = _markersPosition.col(P3)-_markersPosition0.col(ROBOT_BASIS);
-//       Eigen::Vector3f p13,p12;
-
-//       // Compute main directions between the markers  
-//       p13 = _p3-_p1;
-//       p12 = _p2-_p1;
-//       p13 /= p13.norm();
-//       p12 /= p12.norm();
-
-//       // Compute normal vector 
-//       _planeNormal = p13.cross(p12);
-//       _planeNormal /= _planeNormal.norm();
-  
-//       // Compute vertical projection onto the surface
-//       _xProj = _x;
-//       _xProj(2) = (-_planeNormal(0)*(_xProj(0)-_p3(0))-_planeNormal(1)*(_xProj(1)-_p3(1))+_planeNormal(2)*_p3(2))/_planeNormal(2);
-      
-//       // Compute _e1 = normal vector pointing towards the surface
-//       _e1 = -_planeNormal;
-      
-//       // Compute signed normal distance to the plane
-//       _normalDistance = (_xProj-_x).dot(_e1);
-
-//       break;
-//     }
-//     case NON_FLAT:
-//     {
-//       _svm.preComputeKernel(true);
-
-//       // The surface is learned with respect to a frame defined by the marker P1
-//       // We get the robot position in the surface frame
-//       Eigen::Vector3f x;
-//       _p1 = _markersPosition.col(P1)-_markersPosition0.col(ROBOT_BASIS);
-//       _p2 = _markersPosition.col(P2)-_markersPosition0.col(ROBOT_BASIS);
-//       _p3 = _markersPosition.col(P3)-_markersPosition0.col(ROBOT_BASIS);
-
-//       // Compute surface frame, wRs is the rotation matrix for the surface frame to the world frame  
-//       _wRs.col(0) = (_p1-_p3).normalized();
-//       _wRs.col(1) = (_p1-_p2).normalized();
-//       _wRs.col(2) = ((_wRs.col(0)).cross(_wRs.col(1))).normalized();
-
-//       // Compute robot postion in surface frame
-//       x = _wRs.transpose()*(_x-_p1);
-
-//       // We compute the normal distance by evlauating the SVM model
-//       _normalDistance = _svm.calculateGamma(x.cast<double>());
-
-//       // We get the normal vector by evaluating the gradient of the model
-//       _planeNormal = _svm.calculateGammaDerivative(x.cast<double>()).cast<float>();
-//       _planeNormal = _wRs*_planeNormal;
-//       _planeNormal.normalize();
-//       _e1 = -_planeNormal;
-//       std::cerr << "[FootControl]: Normal distance: " << _normalDistance << " Normal vector: " << _e1.transpose() << std::endl;    
-
-//       break;
-//     }
-//     default:
-//     {
-//       break;
-//     }
-//   }
-
-//   if(_normalDistance < 0.0f)
-//   {
-//     _normalDistance = 0.0f;
-//   }
-
-//   // Compute normal force
-//   Eigen::Vector3f F = _filteredWrench.segment(0,3);
-//   _normalForce = _e1.dot(-_wRb*F);
-
-// }
-
-
-// void FootControl::computeNominalDS()
-// {
-//   // Compute fixed attractor on plane
-//   if(_surfaceType == PLANAR)
-//   {
-//     _xAttractor = _p1+0.5f*(_p2-_p1)+0.3f*(_p3-_p1);
-//     _xAttractor(2) = (-_planeNormal(0)*(_xAttractor(0)-_p1(0))-_planeNormal(1)*(_xAttractor(1)-_p1(1))+_planeNormal(2)*_p1(2))/_planeNormal(2);
-//   }
-//   else 
-//   {
-//     _xAttractor = _p1+0.45f*(_p2-_p1)+0.5f*(_p3-_p1);
-//     // _xAttractor += _offset;
-
-//     // Compute normal distance and vector at the attractor location in the surface frame
-//     Eigen::Vector3f x, attractorNormal; 
-//     x = _wRs.transpose()*(_xAttractor-_p1);
-
-//     float attractorNormalDistance = _svm.calculateGamma(x.cast<double>());
-//     attractorNormal = _svm.calculateGammaDerivative(x.cast<double>()).cast<float>();
-//     attractorNormal = _wRs*attractorNormal;
-//     attractorNormal.normalize();
-
-//     // Compute attractor normal projection on the surface int the world frame
-//     _xAttractor -= attractorNormalDistance*attractorNormal;
-//   }
-
-//   // The reaching velocity direction is aligned with the normal vector to the surface
-//   Eigen::Vector3f v0 = _targetVelocity*_e1;
- 
-//   // Compute normalized circular dynamics projected onto the surface
-//   Eigen::Vector3f vdContact;
-//   vdContact = (Eigen::Matrix3f::Identity()-_e1*_e1.transpose())*getCircularMotionVelocity(_x,_xAttractor);
-//   vdContact.normalize();
-
-//   // Compute rotation angle + axis between reaching velocity vector and circular dynamics
-//   float angle = std::acos(v0.normalized().dot(vdContact));
-//   float theta = (1.0f-std::tanh(10*_normalDistance))*angle;
-//   Eigen::Vector3f u = (v0.normalized()).cross(vdContact);
-
-//   // Get corresponding rotation matrix
-//   Eigen::Matrix3f K,R;
-//   if(u.norm() < FLT_EPSILON)
-//   {
-//     R.setIdentity();
-//   }
-//   else
-//   {
-//     u/=u.norm();
-//     K = Utils::getSkewSymmetricMatrix(u);
-//     R = Eigen::Matrix3f::Identity()+std::sin(theta)*K+(1.0f-std::cos(theta))*K*K;
-//   }
-
-//   // Compute nominal DS
-//   _fx = R*v0;
-      
-//   // Bound nominal DS for safety
-//   if(_fx.norm()>_velocityLimit)
-//   {
-//     _fx *= _velocityLimit/_fx.norm();
-//   }
-// }
-
-
-// Eigen::Vector3f FootControl::getCircularMotionVelocity(Eigen::Vector3f position, Eigen::Vector3f attractor)
-// {
-//   Eigen::Vector3f velocity;
-
-//   position = position-attractor;
-
-//   velocity(2) = -position(2);
-
-//   float R = sqrt(position(0) * position(0) + position(1) * position(1));
-//   float T = atan2(position(1), position(0));
-
-//   float r = 0.05f;
-//   float omega = M_PI;
-
-//   velocity(0) = -(R-r) * cos(T) - R * omega * sin(T);
-//   velocity(1) = -(R-r) * sin(T) + R * omega * cos(T);
-
-//   return velocity;
-// }
-
-
-// void FootControl::updateTankScalars()
-// {
-//   if(_s>_smax)
-//   {
-//     _alpha = 0.0f;
-//   }
-//   else
-//   {
-//     _alpha = 1.0f;
-//   }
-//   _alpha = Utils::smoothFall(_s,_smax-0.1f*_smax,_smax);
-
-//   _pn = _d1*_v.dot(_fx);
-
-//   if(_s < 0.0f && _pn < 0.0f)
-//   {
-//     _beta = 0.0f;
-//   }
-//   else if(_s > _smax && _pn > FLT_EPSILON)
-//   {
-//     _beta = 0.0f;
-//   }
-//   else
-//   {
-//     _beta = 1.0f;
-//   }
-  
-//   _pf = _Fd*_v.dot(_e1);
-  
-//   if(_s < FLT_EPSILON && _pf > FLT_EPSILON)
-//   {
-//     _gamma = 0.0f;
-//   }
-//   else if(_s > _smax && _pf < FLT_EPSILON)
-//   {
-//     _gamma = 0.0f;
-//   }
-//   else
-//   {
-//     _gamma = 1.0f;
-//   }
-
-//   if(_pf<FLT_EPSILON)
-//   {
-//     _gammap = 1.0f;
-//   }
-//   else
-//   {
-//     _gammap = _gamma;
-//   }
-// }
 
 
 void FootControl::computeModulatedDS()
@@ -810,6 +579,11 @@ void FootControl::computeModulatedDS()
   {
 
     // Compute modulation gain
+    if(_d1[k]<1.0f)
+    {
+      _d1[k] = 1.0f;
+    }
+
     float delta = std::pow(2.0f*_e1[k].dot(_fx[k])*(_Fd[k]/_d1[k]),2.0f)+4.0f*std::pow(_fx[k].norm(),4.0f); 
     float la;
 
@@ -864,63 +638,6 @@ void FootControl::computeDesiredOrientation()
 {
  for(int k = 0; k < NB_ROBOTS; k++)
   {
-    // Compute rotation error between current orientation and plane orientation using Rodrigues' law
-    // Eigen::Vector3f ref;
-    // if(k == (int) RIGHT)
-    // {
-    //   ref = -_xdD.normalized();
-    // }
-    // else
-    // {
-    //   ref = _xdD.normalized();
-    // }
-      
-    // ref.normalize();
-
-    // // Compute rotation error between current orientation and plane orientation using Rodrigues' law
-    // Eigen::Vector3f u;
-    // u = (_wRb[k].col(2)).cross(ref);
-    // float c = (_wRb[k].col(2)).transpose()*ref;  
-    // float s = u.norm();
-    // u /= s;
-
-    // Eigen::Matrix3f K;
-    // K << Utils::getSkewSymmetricMatrix(u);
-
-    // Eigen::Matrix3f Re;
-    // if(fabs(s)< FLT_EPSILON)
-    // {
-    //   Re = Eigen::Matrix3f::Identity();
-    // }
-    // else
-    // {
-    //   Re = Eigen::Matrix3f::Identity()+s*K+(1-c)*K*K;
-    // }
-    
-    // // Convert rotation error into axis angle representation
-    // Eigen::Vector3f omega;
-    // float angle;
-    // Eigen::Vector4f qtemp = Utils::rotationMatrixToQuaternion(Re);
-    // Utils::quaternionToAxisAngle(qtemp,omega,angle);
-
-    // // Compute final quaternion on plane
-    // Eigen::Vector4f qf = Utils::quaternionProduct(qtemp,_q[k]);
- 
-
-    // if(_normalDistance[k]<0.0f)
-    // {
-    //   _normalDistance[k] = 0.0f;
-    // }
-    // std::cerr << "Quaternion " << k  << " " << _normalDistance[k] << std::endl;
-    // std::cerr << 1.0f-std::tanh(3.0f*_normalDistance) << std::endl;
-    // Eigen::Vector4f q0; 
-    // q0 << 0.0f,0.0f,1.0f,0.0f;
-
-    // _qd = Utils::slerpQuaternion(q0,qf,1.0f-std::tanh(3.0f*_normalDistance));
-    // _qd[k] = Utils::slerpQuaternion(q0,qf,Utils::smoothFall(_normalDistance[k],0.1f,0.6f));
-    // _qd[k] = Utils::slerpQuaternion(_q[k],qf,Utils::smoothFall(_normalDistance[k],0.1f,0.6f));
-    // _qd[k] = qf;
-
     Eigen::Matrix3f Rd;
     if(k == RIGHT)
     {
@@ -942,13 +659,34 @@ void FootControl::computeDesiredOrientation()
       _qd[k] *=-1.0f;
     }
 
+    //   Rd << -1.0f, 0.0f, 0.0f,
+    //         0.0f, 1.0f, 0.0f,
+    //         0.0f, 0.0f, -1.0f;
+    // Eigen::Matrix3f Rx;
+    // float angle = _footPose[RIGHT](4)*M_PI/180.0f;
+    // Rx << 1.0f, 0.0f, 0.0f,
+    //       0.0f, cos(angle), -sin(angle),
+    //       0.0f, sin(angle), cos(angle);
+
+    // Rd = Rx*Rd;
+    // std::cerr << Rd << std::endl;
+
+    // _qd[k] = Utils::rotationMatrixToQuaternion(Rd);
+
+    // if(_q[k].dot(_qd[k])<0)
+    // {
+    //   _qd[k] *=-1.0f;
+    // }
+
+
+     // _qd[k] << 0.0f,0.0f,1.0f,0.0f;
+
     // Compute needed angular velocity to perform the desired quaternion
     Eigen::Vector4f qcurI, wq;
     qcurI(0) = _q[k](0);
     qcurI.segment(1,3) = -_q[k].segment(1,3);
     wq = 5.0f*Utils::quaternionProduct(qcurI,_qd[k]-_q[k]);
     Eigen::Vector3f omegaTemp = _wRb[k]*wq.segment(1,3);
-    // std:cerr << "k: "<< k << " " <<_q[k].dot(_qd[k]) << " omega:  "<< _omegad[k].transpose() << std::endl;
     _omegad[k] = omegaTemp; 
   }
 }
@@ -1230,6 +968,7 @@ void FootControl::updateFootOutput(const custom_msgs::FootOutputMsg::ConstPtr& m
 
   _footPose[k] << msg->x, msg->y,0.0f, msg->phi, msg->theta, msg->psi;
   _footWrench[k] << msg->Fx, msg->Fy,0.0f, msg->Tphi, msg->Ttheta, msg->Tpsi;
+  _footTwist[k] << msg->vx, msg->vy, 0.0f, msg->wphi, msg->wtheta, msg->wpsi;
   _footState[k] = msg->state;
 
   if(!_firstFootOutput[k])
@@ -1273,10 +1012,82 @@ void FootControl::dynamicReconfigureCallback(robot_shared_control::footControl_p
   _filteredForceGain = config.filteredForceGain;
   _velocityLimit = config.velocityLimit;
   _duration = config.duration;
-  _offset(0) = config.xOffset;
-  _offset(1) = config.yOffset;
-  _offset(2) = config.zOffset;
+  _kxy = config.kxy;
+  _dxy = config.dxy;
+  _kphi = config.kphi;
+  _dphi = config.dphi;
   _xyPositionMapping = config.xyPositionMapping;
   _zPositionMapping = config.zPositionMapping;
 }
 
+// void FootControl::computeObjectPose()
+// {
+//   // Check if all markers on the object are tracked
+//   // The four markers are positioned on the corner of the upper face:
+//   // P2 ----- P3
+//   // |        |
+//   // |        |
+//   // P1 ----- P4
+//   if(_markersTracked.segment(NB_ROBOTS,TOTAL_NB_MARKERS-NB_ROBOTS).sum() == TOTAL_NB_MARKERS-NB_ROBOTS)
+//   {
+
+//     if(!_firstObjectPose)
+//     {
+//       _firstObjectPose = true;
+//     }
+
+//     // Compute markers position in the right robot frame
+//     _p1 = _markersPosition.col(P1)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
+//     _p2 = _markersPosition.col(P2)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
+//     _p3 = _markersPosition.col(P3)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
+//     _p4 = _markersPosition.col(P4)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
+
+//     // Compute object center position
+//     _xoC = (_p1+_p2+_p3+_p4)/4.0f;
+//     // Compute object dimension vector
+//     // The dimension obtained from the markers is adjusted to match the real
+//     // object dimension
+//     _xoD = (_p3+_p4-_p1-_p2)/2.0f;
+//     _xoD = 0.20f*_xoD.normalized(); 
+
+//     // Filter center position and dimension vector of the object
+//     SGF::Vec temp(3);
+//     _xCFilter.AddData(_xoC);
+//     _xCFilter.GetOutput(0,temp);
+//     _xoC = temp;
+//     Eigen::Vector3f xDir = _p2-_p1;
+//     xDir.normalize();
+//     Eigen::Vector3f yDir = _p1-_p4;
+//     yDir.normalize();
+//     Eigen::Vector3f zDir = xDir.cross(yDir);
+//     zDir.normalize();
+//     _zDirFilter.AddData(xDir.cross(yDir));
+//     _zDirFilter.GetOutput(0,temp);
+//     zDir = temp;
+//     zDir.normalize();   
+//     _xoC -= 1.0f*(_objectDim(2)/2.0f)*zDir;
+      
+//     // Filter object direction
+//     _xDFilter.AddData(_xoD);
+//     _xDFilter.GetOutput(0,temp);
+//     _xoD = 0.20f*temp.normalized();
+
+//     // std::cerr <<"real" << _xdD.norm() << " " <<_xdD.transpose() << std::endl;
+//     // std::cerr << "filter" <<  _xoD.norm() << " " <<_xoD.transpose() << std::endl;
+
+//     _msgMarker.pose.position.x = _xoC(0);
+//     _msgMarker.pose.position.y = _xoC(1);
+//     _msgMarker.pose.position.z = _xoC(2);
+//     Eigen::Matrix3f R;
+//     R.col(0) = xDir;
+//     R.col(1) = yDir;
+//     R.col(2) = zDir;
+//     Eigen::Vector4f q = Utils::rotationMatrixToQuaternion(R);
+//     _msgMarker.pose.orientation.x = q(1);
+//     _msgMarker.pose.orientation.y = q(2);
+//     _msgMarker.pose.orientation.z = q(3);
+//     _msgMarker.pose.orientation.w = q(0);
+
+//   }
+
+// }

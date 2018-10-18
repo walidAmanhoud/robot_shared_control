@@ -3,13 +3,11 @@
 
 FalconControl* FalconControl::me = NULL;
 
-FalconControl::FalconControl(ros::NodeHandle &n, double frequency):
+FalconControl::FalconControl(ros::NodeHandle &n, double frequency, std::string filename):
   _n(n),
   _loopRate(frequency),
   _dt(1.0f/frequency),
-  _xCFilter(3,3,6,1.0f/frequency),
-  _xDFilter(3,3,6,1.0f/frequency),
-  _zDirFilter(3,3,6,1.0f/frequency)
+  _filename(filename)
 {
   me = this;
 
@@ -38,10 +36,13 @@ FalconControl::FalconControl(ros::NodeHandle &n, double frequency):
   _p << 0.0f,0.0f,-0.007f;
   // _taskAttractor << -0.65f, 0.05f, -0.007f;
   _taskAttractor << -0.6f, 0.1f, 0.4f;
-  _xAttractor[0] << -0.8, 0.4f,0.4f;
-  _xAttractor[0] << -0.7, 0.0f,0.14f;
-  _xAttractor[1] << -0.7, -0.5f,0.4f;
-  _xAttractor[2] << -0.7, 0.0f,0.7f;
+  // _xAttractor[0] << -0.8, 0.4f,0.4f;
+  // _xAttractor[0] << -0.7, 0.0f,0.14f;
+  // _xAttractor[1] << -0.7, -0.5f,0.4f;
+  // _xAttractor[2] << -0.7, 0.0f,0.7f;
+  _xAttractor[0] << -0.6, 0.0f,0.11f;
+  _xAttractor[1] << -0.6, -0.5f,0.4f;
+  _xAttractor[2] << -0.6, 0.0f,0.6f;
   _planeNormal << 0.0f, 0.0f, 1.0f;
 
   _xFalcon.setConstant(0.0f);
@@ -93,6 +94,7 @@ FalconControl::FalconControl(ros::NodeHandle &n, double frequency):
   for(int k = 0; k < NB_TASKS; k++)
   {
     _fxk[k].setConstant(0.0f);
+    _Fdk[k] = 0.0f;
   }
   _fx.setConstant(0.0f);
   _beliefs(2) = 1.0f;
@@ -103,6 +105,15 @@ FalconControl::FalconControl(ros::NodeHandle &n, double frequency):
   _targetForce = 10.0f;
   _sigmaH =0.0f;
 
+  _Emin = 0.0f;
+  _Emax = 3.0f;
+  _Et = (_Emin+_Emax)/2.0f;
+  _Et = 0.0f;
+  _E = _Et;
+  _epsilon = 2.0f;
+  _h = (_E-_Emin)/(_Emax-_Emin);
+  _sigma = 1.0f;
+  _tankRate = 0.5f;
 
 }
 
@@ -138,6 +149,9 @@ bool FalconControl::init()
 
   signal(SIGINT,FalconControl::stopNode);
 
+  _outputFile.open(ros::package::getPath(std::string("robot_shared_control"))+"/data_falcon/"+_filename+".txt");
+
+
   if(!_n.getParamCached("/lwr/ds_param/damping_eigval0",_d1))
   {
     ROS_ERROR("[FalconControl]: Cannot read first eigen value of passive ds controller");
@@ -168,9 +182,7 @@ void FalconControl::run()
     // std::cerr << (int) _firstRobotPose << " " << (int) _firstRobotTwist << " " << (int) _firstFootInterfaceData << std::endl;
     // std::cerr << _firstOptitrackPose[ROBOT_BASIS_LEFT] << _firstOptitrackPose[ROBOT_BASIS_RIGHT] << _firstOptitrackPose[P1] <<
        // _firstOptitrackPose[P2] << _firstOptitrackPose[P3] << _firstOptitrackPose[P4] << _firstDampingMatrix << _firstFootInterfaceData<<std::endl;
-    if(_firstRobotPose && _firstRobotTwist && _wrenchBiasOK &&
-       _firstOptitrackPose[ROBOT_BASIS_LEFT] && _firstOptitrackPose[ROBOT_BASIS_RIGHT] && _firstOptitrackPose[P1] &&
-       _firstOptitrackPose[P2] && _firstOptitrackPose[P3] && _firstOptitrackPose[P4] && _firstDampingMatrix &&
+    if(_firstRobotPose && _firstRobotTwist && _wrenchBiasOK && _firstDampingMatrix &&
        _firstFalconPosition && _firstFalconVelocity && _firstFalconButtons)
     {
       _mutex.lock();
@@ -178,38 +190,22 @@ void FalconControl::run()
       // Check for update of the DS-impedance controller gain
       ros::param::getCached("/lwr/ds_param/damping_eigval0",_d1);
 
-      // Initialize optitrack
-      if(!_optitrackOK)
-      {
-        optitrackInitialization();
-      }
-      else
-      {
+      // Compute control command
+      computeCommand();
 
-        // Compute object pose
-        computeObjectPose();
+      computeFalconForce();
 
-        if(_firstObjectPose)
-        {
-          // Compute control command
-          computeCommand();
-
-          computeFalconForce();
-
-          // Publish data to topics
-          publishData();
-        }
+      // Publish data to topics
+      publishData();
 
         // Log data
-        // logData();
-      }
+      logData();
 
       _mutex.unlock();
-
     }
 
-    ros::spinOnce();
 
+    ros::spinOnce();
     _loopRate.sleep();
   }
 
@@ -222,6 +218,8 @@ void FalconControl::run()
   ros::spinOnce();
   _loopRate.sleep();
 
+  _outputFile.close();
+
   ros::shutdown();
 }
 
@@ -232,114 +230,80 @@ void FalconControl::stopNode(int sig)
 }
 
 
-void FalconControl::computeObjectPose()
-{
-  // Check if all markers on the object are tracked
-  // The four markers are positioned on the corner of the upper face:
-  // P2 ----- P3
-  // |        |
-  // |        |
-  // P1 ----- P4
-  if(_markersTracked.segment(NB_ROBOTS,TOTAL_NB_MARKERS-NB_ROBOTS).sum() == TOTAL_NB_MARKERS-NB_ROBOTS)
-  {
-
-    if(!_firstObjectPose)
-    {
-      _firstObjectPose = true;
-    }
-
-    // Compute markers position in the right robot frame
-    _p1 = _markersPosition.col(P1)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
-    _p2 = _markersPosition.col(P2)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
-    _p3 = _markersPosition.col(P3)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
-    _p4 = _markersPosition.col(P4)-_markersPosition0.col(ROBOT_BASIS_RIGHT);
-
-    // Compute object center position
-    _xoC = (_p1+_p2+_p3+_p4)/4.0f;
-    // Compute object dimension vector
-    // The dimension obtained from the markers is adjusted to match the real
-    // object dimension
-    _xoD = (_p3+_p4-_p1-_p2)/2.0f;
-    _xoD = 0.20f*_xoD.normalized(); 
-
-    // Filter center position and dimension vector of the object
-    SGF::Vec temp(3);
-    _xCFilter.AddData(_xoC);
-    _xCFilter.GetOutput(0,temp);
-    _xoC = temp;
-    Eigen::Vector3f xDir = _p2-_p1;
-    xDir.normalize();
-    Eigen::Vector3f yDir = _p1-_p4;
-    yDir.normalize();
-    Eigen::Vector3f zDir = xDir.cross(yDir);
-    zDir.normalize();
-    _zDirFilter.AddData(xDir.cross(yDir));
-    _zDirFilter.GetOutput(0,temp);
-    zDir = temp;
-    zDir.normalize();   
-    _xoC -= 1.0f*(_objectDim(2)/2.0f)*zDir;
-    std::cerr << _xoC.transpose() << std::endl; 
-      
-    // Filter object direction
-    _xDFilter.AddData(_xoD);
-    _xDFilter.GetOutput(0,temp);
-    _xoD = 0.20f*temp.normalized();
-
-    // std::cerr <<"real" << _xdD.norm() << " " <<_xdD.transpose() << std::endl;
-    // std::cerr << "filter" <<  _xoD.norm() << " " <<_xoD.transpose() << std::endl;
-
-  }
-
-}
-
-
 void FalconControl::computeCommand()
 {
   falconDataTransformation();
 
-  rateControllerStep();
+  positionVelocityMapping();
 
+  // Update individual
   updateIndividualTasks();
 
-  if(_buttonsFalcon != (int) CENTER)
-  {
+  // Update tasks' beliefs using task adaptation
+  // if(_buttonsFalcon != (int) CENTER)
+  // {
     taskAdaptation();
-  }
+  // }
 
+  // Compute adapted task
   _fx.setConstant(0.0f);
   for(int k = 0; k < NB_TASKS; k++)
   {
     _fx+=_beliefs[k]*_fxk[k];
   }
 
+  // Compute desired contact force profile from task adaptation
+  // Eigen::MatrixXf::Index indexMax;
+  // if(fabs(1.0f-_beliefs.array().maxCoeff(&indexMax))<FLT_EPSILON)
+  // {
+  //   _Fd = _Fdk[indexMax];
+  // }
+  // else
+  // {
+  //   _Fd = 0.0f;
+  // }
+
   Eigen::MatrixXf::Index indexMax;
-  if(fabs(1.0f-_beliefs.array().maxCoeff(&indexMax))<FLT_EPSILON)
+  float bmax = _beliefs.array().maxCoeff(&indexMax);
+  if(fabs(1.0-bmax)< FLT_EPSILON /*&& _beliefs[NB_TASKS-1]>0.5f*/)
   {
     _Fd = _Fdk[indexMax];
-     if(_buttonsFalcon == (int) CENTER)
-     {
-      _sigmaH += 5.0f*_dt*_vM.dot(_e1);
-      if(_sigmaH>1)
-      {
-        _sigmaH = 1.0f;
-      }
-      else if(_sigmaH<0.0f)
-      {
-        _sigmaH = 0.0f;
-      }
-    }
-    _Fd*=(1+_sigmaH);
   }
   else
   {
-    _Fd = 0.0f;
-    _sigmaH = 0.0f;
+    // _Fd = 0.0f;
+    _Fd = _Fdk[indexMax];
   }
-  std::cerr << "dBeliefs: " << _dbeliefs.transpose() << std::endl;
-  std::cerr << "vM: " << _vM.norm() << std::endl;
-  std::cerr << "beliefs: " << _beliefs.transpose() << std::endl;
-  std::cerr << "f: " << _fx.transpose() << " Fd: " << _Fd << " sigmaH: "<< _sigmaH << std::endl;
+  forceAdaptation();
+  // Compute force scaling using contact force adaptation
 
+  // Eigen::MatrixXf::Index indexMax;
+  // if(fabs(1.0f-_beliefs.array().maxCoeff(&indexMax))<FLT_EPSILON)
+  // {
+  //   _Fd = _Fdk[indexMax];
+  //    if(_buttonsFalcon == (int) CENTER)
+  //    {
+  //     _sigmaH += 5.0f*_dt*_vM.dot(_e1);
+  //     if(_sigmaH>1)
+  //     {
+  //       _sigmaH = 1.0f;
+  //     }
+  //     else if(_sigmaH<0.0f)
+  //     {
+  //       _sigmaH = 0.0f;
+  //     }
+  //   }
+  //   _Fd*=(1+_sigmaH);
+  // }
+  // else
+  // {
+  //   _Fd = 0.0f;
+  //   _sigmaH = 0.0f;
+  // }
+  // std::cerr << "dBeliefs: " << _dbeliefs.transpose() << std::endl;
+  // std::cerr << "vM: " << _vM.transpose() << std::endl;
+  std::cerr << "beliefs: " << _beliefs.transpose() << std::endl;
+  std::cerr << "h: " << _h << " E: " << _E << " sigma: " << _sigma << std::endl;
   // _vd = _vh;
   // _vd.setConstant(0.0f);
   // _vd = _fx;
@@ -375,21 +339,42 @@ void FalconControl::updateIndividualTasks()
 {
   for(int k = 0; k < NB_TASKS; k++)
   {
+    if(k<NB_TASKS-1)
+    {
     _fxk[k] = _xAttractor[k]-_x;
-    _Fdk[k] = 0.0f;
+    _Fdk[k] = 0.0f;      
+    }
   }
 
   Eigen::Vector3f F = _filteredWrench.segment(0,3);
   _normalForce = _e1.dot(-_wRb*F);
+
+  _normalDistance = _x(2)-_xAttractor[0](2);
+  if(_normalDistance<0)
+  {
+    _normalDistance = 0.0f;
     // Compute desired force profile
-  if(_normalForce<3.0f)
-  {
-    _Fdk[0] = 5.0f;
   }
-  else
-  {
-    _Fdk[0] = _targetForce;
-  }
+  // std::cerr << _normalDistance << std::endl;
+  _Fdk[0] = (1.0f-std::tanh(20*_normalDistance))*_targetForce;
+//   float alpha;
+//   if(_targetForce*alpha>4)
+//   {
+//     _Fdk[0]  = _targetForce
+//   }
+//   else
+// {
+
+// }
+//   _Fdk[0] = Utils::smoothFall(_normalDistance,0.02,0.1f)*_targetForce;
+  // if(_normalForce<3.0f)
+  // {
+  //   _Fdk[0] = 3.0f;
+  // }
+  // else
+  // {
+  //   _Fdk[0] = _targetForce;
+  // }
 
 }
 
@@ -401,42 +386,92 @@ void FalconControl::taskAdaptation()
     _fx+=_beliefs[k]*_fxk[k];
   }
 
-  for(int k = 0; k < NB_TASKS; k++)
-  {
-    _dbeliefs[k] = _adaptationRate*((_vh-_fx).dot(_fxk[k])+(_beliefs[k]-0.5f)*_fxk[k].squaredNorm());
-    // std::cerr << k << " " << (_vh-_fx).dot(_fxk[k]) << std::endl;
-  }
-
   Eigen::MatrixXf::Index indexMax;
-  float bmax = _dbeliefs.array().maxCoeff(&indexMax);
-  if(fabs(1.0f-bmax)< FLT_EPSILON)
+  float bmax = _beliefs.array().maxCoeff(&indexMax);
+  if(fabs(1.0-bmax)< FLT_EPSILON /*&& _beliefs[NB_TASKS-1]>0.5f*/)
   {
-    _dbeliefs(indexMax) = 0.0f;
+    _Fd = _Fdk[indexMax];
+  }
+  else
+  {
+    _Fd = _Fdk[indexMax];
+  }
+  // std::cerr << _Fd << std::endl;
+  // Eigen::Vector3f vhf;
+  // vhf = _vh;
+  // if(fabs(vhf.dot(_e1))<0.05f)
+  // {
+  //   vhf.setConstant(0.0f);
+  // }
+
+  for(int k = 0; k < NB_TASKS-1; k++)
+  {
+    _dbeliefs[k] = _adaptationRate*(_sigma*(_vh-_fx).dot(_fxk[k])+(_beliefs[k]-0.5f)*_fxk[k].squaredNorm());
+    // std::cerr << k << " " << (_vh-_fx).dot(_fxk[k]) << " " <<(_beliefs[k]-0.5f)*_fxk[k].squaredNorm() <<std::endl;
+  }
+  float efmax = 5.0f;
+  float efmin = -8.0f;
+  float ef = (_normalForce-2*_h*_Fd);
+  float g = 0.0f;
+  if(ef > efmax)
+  {
+    g = (ef-efmax)*(ef-efmax);
+  }
+  else if(ef < efmin)
+  {
+    g = (ef-efmin)*(ef-efmin);
+  }
+  else 
+  {
+    g = 0.0f;
+  }
+  // _dbeliefs[NB_TASKS-1] = _beliefs[NB_TASKS-1]-0.5+(_normalForce-_Fd)*(_normalForce-_Fd);
+  // std::cerr << _beliefs[NB_TASKS-1]-0.5 << " " << (_normalForce-_Fd)*(_normalForce-_Fd) << std::endl;
+
+
+  _dbeliefs[NB_TASKS-1] = (_beliefs[NB_TASKS-1]-0.5)+g;
+  // _dbeliefs[NB_TASKS-1] = -100;
+  std::cerr << _beliefs[NB_TASKS-1]-0.5 << " " << g << std::endl;
+
+  std::cerr << "dBeliefs: " << _dbeliefs.transpose() << std::endl;
+
+  // Eigen::MatrixXf::Index indexMax;
+  float dbmax = _dbeliefs.array().maxCoeff(&indexMax);
+  if(std::fabs(1.0f-_beliefs(indexMax))< FLT_EPSILON && std::fabs(_beliefs.sum()-1)<FLT_EPSILON)
+  {
+    _dbeliefs.setConstant(0.0f);
+  }
+  else if(indexMax == NB_TASKS-1 && dbmax < FLT_EPSILON && std::fabs(_beliefs.segment(0,NB_TASKS-1).array().maxCoeff()-1)<FLT_EPSILON)
+  {
+    _dbeliefs.setConstant(0.0f);
+  }
+  else
+  {
+    Eigen::Matrix<float,NB_TASKS-1,1> temp;
+    int m = 0;
+    for(int k = 0; k < NB_TASKS; k++)
+    {
+      if(k!=indexMax)
+      {
+        temp[m] = _dbeliefs[k];
+        m++;
+      }
+    }
+    float db2max = temp.array().maxCoeff();
+    float z = (dbmax+db2max)/2.0f;
+    _dbeliefs.array() -= z;
+
+    float S = 0.0f;
+    for(int k = 0; k < NB_TASKS; k++)
+    {
+      if(fabs(_beliefs[k])>FLT_EPSILON || _dbeliefs[k] > 0)
+      {
+        S+=_dbeliefs[k];
+      }
+    }
+    _dbeliefs[indexMax]-=S;
   }
 
-  Eigen::Matrix<float,NB_TASKS-1,1> temp;
-  int m = 0;
-  for(int k = 0; k < NB_TASKS; k++)
-  {
-    if(k!=indexMax)
-    {
-      temp[m] = _dbeliefs[k];
-      m++;
-    }
-  }
-  float b2max = temp.array().maxCoeff();
-  float z = (bmax+b2max)/2.0f;
-  _dbeliefs.array() -= z;
-
-  float S = 0.0f;
-  for(int k = 0; k < NB_TASKS; k++)
-  {
-    if(fabs(_beliefs[k])>FLT_EPSILON || _dbeliefs[k] > 0)
-    {
-      S+=_dbeliefs[k];
-    }
-  }
-  _dbeliefs[indexMax]-=S;
   _beliefs+=_dt*_dbeliefs;
   for(int k = 0; k < NB_TASKS; k++)
   {
@@ -451,8 +486,74 @@ void FalconControl::taskAdaptation()
   }
 
   std::cerr << "dBeliefs: " << _dbeliefs.transpose() << std::endl;
-  std::cerr << "beliefs: " << _beliefs.transpose() << std::endl;
+  // std::cerr << "beliefs: " << _beliefs.transpose() << std::endl;
 }
+
+void FalconControl::forceAdaptation()
+{
+  float k;
+  float dE;
+  if(fabs(_Fd)<FLT_EPSILON)
+  {
+    k = 2.0f;
+  }
+  else
+  {
+    k = 0.0f;
+  }
+  Eigen::Vector3f vhf;
+  vhf = _vh;
+  if(fabs(vhf.dot(_e1))<0.05f)
+  {
+    vhf.setConstant(0.0f);
+  }
+
+
+  float alpha;
+  Eigen::Vector3f F = _filteredWrench.segment(0,3);
+  _normalForce = std::fabs(_e1.dot(-_wRb*F));
+  if(vhf.dot(_e1)> -FLT_EPSILON)
+  {
+    alpha = 1.0f-std::min(_normalForce/12.0f,1.0f);
+  } 
+  else
+  {
+    alpha = 1.0f;
+  }
+
+  // std::cerr << "alpha: " << alpha << " normal distance: " << _normalDistance <<  std::endl;
+
+  dE = alpha*vhf.dot(_Fd*_e1)+k*(_Et-_E);
+
+  _E += _tankRate*dE*_dt;
+
+  if(_E<_Emin)
+  {
+    _E = _Emin;
+  }
+  else if(_E > _Emax)
+  {
+    _E = _Emax;
+  }
+
+  _h = (_E-_Emin)/(_Emax-_Emin);
+
+  Eigen::MatrixXf::Index indexMax;
+
+  // if(fabs(_Fd)>FLT_EPSILON && fabs(1.0f-_beliefs.segment(0,NB_TASKS-1).array().maxCoeff(&indexMax))<FLT_EPSILON)
+  // if(fabs(_Fd)>FLT_EPSILON && _beliefs[NB_TASKS-1] < 0.5f)
+  // std::cerr << "power: " << _Fd*_e1.dot(_fx) << std::endl;
+  // if(fabs(_Fd)>FLT_EPSILON)
+  // if(fabs(_Fd)>FLT_EPSILON)
+  {
+    _sigma = Utils::smoothFall(_h,0.0f,0.5f);
+  }
+  // else
+  // {
+  //   _sigma = 1.0f;
+  // }
+}
+
 
 void FalconControl::falconDataTransformation()
 {
@@ -467,7 +568,7 @@ void FalconControl::falconDataTransformation()
 }
 
 
-void FalconControl::rateControllerStep()
+void FalconControl::positionVelocityMapping()
 {
   Eigen::Vector3f gains;
   gains << 2.0f*_velocityLimit/FALCON_INTERFACE_X_RANGE, 2.0f*_velocityLimit/FALCON_INTERFACE_Y_RANGE, 2.0f*_velocityLimit/FALCON_INTERFACE_Z_RANGE;
@@ -507,7 +608,7 @@ void FalconControl::computeFalconForce()
   // if(fabs(1.0f-_beliefs.array().maxCoeff())<FLT_EPSILON)
   {
     _FdFalcon = -K*_xFalcon-D*_vFalcon;
-     if(_buttonsFalcon == (int) CENTER && _vh(2)<0.0)
+     if(_buttonsFalcon == (int) CENTER)
      {
       _FdFalcon(2)+=_normalForce;
      }
@@ -520,229 +621,6 @@ void FalconControl::computeFalconForce()
   // std::cerr << "Falcon desired force: " << _FdFalcon.transpose() << " " << std::endl;
 
 }
-// void FalconControl::updateSurfaceInformation()
-// {
-//   switch(_surfaceType)
-//   {
-//     case PLANAR:
-//     {
-//       // Compute markers position in the robot frame
-//       // The three markers are positioned on the surface to form an angle of 90 deg:
-//       // P1 ----- P2
-//       // |       
-//       // |
-//       // P3
-//       _p1 = _markersPosition.col(P1)-_markersPosition0.col(ROBOT_BASIS);
-//       _p2 = _markersPosition.col(P2)-_markersPosition0.col(ROBOT_BASIS);
-//       _p3 = _markersPosition.col(P3)-_markersPosition0.col(ROBOT_BASIS);
-//       Eigen::Vector3f p13,p12;
-
-//       // Compute main directions between the markers  
-//       p13 = _p3-_p1;
-//       p12 = _p2-_p1;
-//       p13 /= p13.norm();
-//       p12 /= p12.norm();
-
-//       // Compute normal vector 
-//       _planeNormal = p13.cross(p12);
-//       _planeNormal /= _planeNormal.norm();
-  
-//       // Compute vertical projection onto the surface
-//       _xProj = _x;
-//       _xProj(2) = (-_planeNormal(0)*(_xProj(0)-_p3(0))-_planeNormal(1)*(_xProj(1)-_p3(1))+_planeNormal(2)*_p3(2))/_planeNormal(2);
-      
-//       // Compute _e1 = normal vector pointing towards the surface
-//       _e1 = -_planeNormal;
-      
-//       // Compute signed normal distance to the plane
-//       _normalDistance = (_xProj-_x).dot(_e1);
-
-//       break;
-//     }
-//     case NON_FLAT:
-//     {
-//       _svm.preComputeKernel(true);
-
-//       // The surface is learned with respect to a frame defined by the marker P1
-//       // We get the robot position in the surface frame
-//       Eigen::Vector3f x;
-//       _p1 = _markersPosition.col(P1)-_markersPosition0.col(ROBOT_BASIS);
-//       _p2 = _markersPosition.col(P2)-_markersPosition0.col(ROBOT_BASIS);
-//       _p3 = _markersPosition.col(P3)-_markersPosition0.col(ROBOT_BASIS);
-
-//       // Compute surface frame, wRs is the rotation matrix for the surface frame to the world frame  
-//       _wRs.col(0) = (_p1-_p3).normalized();
-//       _wRs.col(1) = (_p1-_p2).normalized();
-//       _wRs.col(2) = ((_wRs.col(0)).cross(_wRs.col(1))).normalized();
-
-//       // Compute robot postion in surface frame
-//       x = _wRs.transpose()*(_x-_p1);
-
-//       // We compute the normal distance by evlauating the SVM model
-//       _normalDistance = _svm.calculateGamma(x.cast<double>());
-
-//       // We get the normal vector by evaluating the gradient of the model
-//       _planeNormal = _svm.calculateGammaDerivative(x.cast<double>()).cast<float>();
-//       _planeNormal = _wRs*_planeNormal;
-//       _planeNormal.normalize();
-//       _e1 = -_planeNormal;
-//       std::cerr << "[FalconControl]: Normal distance: " << _normalDistance << " Normal vector: " << _e1.transpose() << std::endl;    
-
-//       break;
-//     }
-//     default:
-//     {
-//       break;
-//     }
-//   }
-
-//   if(_normalDistance < 0.0f)
-//   {
-//     _normalDistance = 0.0f;
-//   }
-
-//   // Compute normal force
-//   Eigen::Vector3f F = _filteredWrench.segment(0,3);
-//   _normalForce = _e1.dot(-_wRb*F);
-
-// }
-
-
-// void FalconControl::computeNominalDS()
-// {
-//   // Compute fixed attractor on plane
-//   if(_surfaceType == PLANAR)
-//   {
-//     _xAttractor = _p1+0.5f*(_p2-_p1)+0.3f*(_p3-_p1);
-//     _xAttractor(2) = (-_planeNormal(0)*(_xAttractor(0)-_p1(0))-_planeNormal(1)*(_xAttractor(1)-_p1(1))+_planeNormal(2)*_p1(2))/_planeNormal(2);
-//   }
-//   else 
-//   {
-//     _xAttractor = _p1+0.45f*(_p2-_p1)+0.5f*(_p3-_p1);
-//     // _xAttractor += _offset;
-
-//     // Compute normal distance and vector at the attractor location in the surface frame
-//     Eigen::Vector3f x, attractorNormal; 
-//     x = _wRs.transpose()*(_xAttractor-_p1);
-
-//     float attractorNormalDistance = _svm.calculateGamma(x.cast<double>());
-//     attractorNormal = _svm.calculateGammaDerivative(x.cast<double>()).cast<float>();
-//     attractorNormal = _wRs*attractorNormal;
-//     attractorNormal.normalize();
-
-//     // Compute attractor normal projection on the surface int the world frame
-//     _xAttractor -= attractorNormalDistance*attractorNormal;
-//   }
-
-//   // The reaching velocity direction is aligned with the normal vector to the surface
-//   Eigen::Vector3f v0 = _targetVelocity*_e1;
- 
-//   // Compute normalized circular dynamics projected onto the surface
-//   Eigen::Vector3f vdContact;
-//   vdContact = (Eigen::Matrix3f::Identity()-_e1*_e1.transpose())*getCircularMotionVelocity(_x,_xAttractor);
-//   vdContact.normalize();
-
-//   // Compute rotation angle + axis between reaching velocity vector and circular dynamics
-//   float angle = std::acos(v0.normalized().dot(vdContact));
-//   float theta = (1.0f-std::tanh(10*_normalDistance))*angle;
-//   Eigen::Vector3f u = (v0.normalized()).cross(vdContact);
-
-//   // Get corresponding rotation matrix
-//   Eigen::Matrix3f K,R;
-//   if(u.norm() < FLT_EPSILON)
-//   {
-//     R.setIdentity();
-//   }
-//   else
-//   {
-//     u/=u.norm();
-//     K = Utils::getSkewSymmetricMatrix(u);
-//     R = Eigen::Matrix3f::Identity()+std::sin(theta)*K+(1.0f-std::cos(theta))*K*K;
-//   }
-
-//   // Compute nominal DS
-//   _fx = R*v0;
-      
-//   // Bound nominal DS for safety
-//   if(_fx.norm()>_velocityLimit)
-//   {
-//     _fx *= _velocityLimit/_fx.norm();
-//   }
-// }
-
-
-// Eigen::Vector3f FalconControl::getCircularMotionVelocity(Eigen::Vector3f position, Eigen::Vector3f attractor)
-// {
-//   Eigen::Vector3f velocity;
-
-//   position = position-attractor;
-
-//   velocity(2) = -position(2);
-
-//   float R = sqrt(position(0) * position(0) + position(1) * position(1));
-//   float T = atan2(position(1), position(0));
-
-//   float r = 0.05f;
-//   float omega = M_PI;
-
-//   velocity(0) = -(R-r) * cos(T) - R * omega * sin(T);
-//   velocity(1) = -(R-r) * sin(T) + R * omega * cos(T);
-
-//   return velocity;
-// }
-
-
-// void FalconControl::updateTankScalars()
-// {
-//   if(_s>_smax)
-//   {
-//     _alpha = 0.0f;
-//   }
-//   else
-//   {
-//     _alpha = 1.0f;
-//   }
-//   _alpha = Utils::smoothFall(_s,_smax-0.1f*_smax,_smax);
-
-//   _pn = _d1*_v.dot(_fx);
-
-//   if(_s < 0.0f && _pn < 0.0f)
-//   {
-//     _beta = 0.0f;
-//   }
-//   else if(_s > _smax && _pn > FLT_EPSILON)
-//   {
-//     _beta = 0.0f;
-//   }
-//   else
-//   {
-//     _beta = 1.0f;
-//   }
-  
-//   _pf = _Fd*_v.dot(_e1);
-  
-//   if(_s < FLT_EPSILON && _pf > FLT_EPSILON)
-//   {
-//     _gamma = 0.0f;
-//   }
-//   else if(_s > _smax && _pf < FLT_EPSILON)
-//   {
-//     _gamma = 0.0f;
-//   }
-//   else
-//   {
-//     _gamma = 1.0f;
-//   }
-
-//   if(_pf<FLT_EPSILON)
-//   {
-//     _gammap = 1.0f;
-//   }
-//   else
-//   {
-//     _gammap = _gamma;
-//   }
-// }
 
 
 void FalconControl::computeModulatedDS()
@@ -757,8 +635,10 @@ void FalconControl::computeModulatedDS()
   // updateTankScalars();
   _gammap = 1.0f;
 
+  float _scaledFd = 2.0f*_h*_Fd;
+
   // Compute modulation gain
-  float delta = std::pow(2.0f*_e1.dot(_fx)*_gammap*_Fd/_d1,2.0f)+4.0f*std::pow(_fx.norm(),4.0f); 
+  float delta = std::pow(2.0f*_e1.dot(_fx)*_gammap*_scaledFd/_d1,2.0f)+4.0f*std::pow(_fx.norm(),4.0f); 
   float la;
   if(fabs(_fx.norm())<FLT_EPSILON)
   {
@@ -766,7 +646,7 @@ void FalconControl::computeModulatedDS()
   }
   else
   {
-    la = (-2.0f*_e1.dot(_fx)*_gammap*_Fd/_d1+sqrt(delta))/(2.0f*std::pow(_fx.norm(),2.0f));
+    la = (-2.0f*_e1.dot(_fx)*_gammap*_scaledFd/_d1+sqrt(delta))/(2.0f*std::pow(_fx.norm(),2.0f));
   }
 
   // if(_s < 0.0f && _pn < 0.0f)
@@ -795,10 +675,10 @@ void FalconControl::computeModulatedDS()
   // _dW = (la-1.0f)*(1-_beta)*_pn+(_gammap-_gamma)*_pf-(1-_alpha)*_pd;
 
   // Compute modulated DS
-  _vd = la*_fx+_gammap*_Fd*_e1/_d1;
+  _vd = la*_fx+_gammap*_scaledFd*_e1/_d1;
 
-  std::cerr << "[FalconControl]: F: " << _normalForce << " Fd:  " << _gammap*_Fd << " ||fx||: " << _fx.norm() << std::endl;
-  std::cerr << "[FalconControl]: la: " << la << " vd: " << _vd.norm() << std::endl;
+  std::cerr << "[FalconControl]: F: " << _normalForce << " Fd:  " << _Fd << " Fdh:  " << _scaledFd << " ||fx||: " << _fx.norm() << std::endl;
+  // std::cerr << "[FalconControl]: la: " << la << " vd: " << _vd.norm() << std::endl;
   // std::cerr << "[FalconControl]: Tank: " << _s  <<" dW: " << _dW <<std::endl;
 
 
@@ -872,27 +752,24 @@ void FalconControl::computeDesiredOrientation()
 }
 
 
-// void FalconControl::logData()
-// {
-//   _outputFile << ros::Time::now() << " "
-//               << _x.transpose() << " "
-//               << _v.transpose() << " "
-//               << _fx.transpose() << " "
-//               << _vd.transpose() << " "
-//               << _e1.transpose() << " "
-//               << _wRb.col(2).transpose() << " "
-//               << (_markersPosition.col(P1)-_markersPosition.col(ROBOT_BASIS)).transpose() << " "
-//               << _normalDistance << " "
-//               << _normalForce << " "
-//               << _Fd << " "
-//               << _sequenceID << " "
-//               << _s << " " 
-//               << _alpha << " "
-//               << _beta << " "
-//               << _gamma << " "
-//               << _gammap << " "
-//               << _dW << " " << std::endl;
-// }
+void FalconControl::logData()
+{
+  _outputFile << ros::Time::now() << " "
+              << _x.transpose() << " "
+              << _v.transpose() << " "
+              << _fx.transpose() << " "
+              << _vd.transpose() << " "
+              << _e1.transpose() << " "
+              << _wRb.col(2).transpose() << " "
+              << _normalDistance << " "
+              << _normalForce << " "
+              << _Fd << " "
+              << _beliefs.transpose() << " "
+              << _E << " "
+              << _sigma << " "
+              << _h << " "
+              << _vh.transpose() << std::endl;
+}
 
 
 void FalconControl::publishData()
