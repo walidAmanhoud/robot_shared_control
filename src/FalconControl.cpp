@@ -4,7 +4,7 @@
 FalconControl* FalconControl::me = NULL;
 
 FalconControl::FalconControl(ros::NodeHandle &n, double frequency, std::string filename):
-  _n(n),
+  _nh(n),
   _loopRate(frequency),
   _dt(1.0f/frequency),
   _filename(filename)
@@ -95,12 +95,14 @@ FalconControl::FalconControl(ros::NodeHandle &n, double frequency, std::string f
   {
     _fxk[k].setConstant(0.0f);
     _Fdk[k] = 0.0f;
+    _nk[k].setConstant(0.0f);
+    
   }
   _fx.setConstant(0.0f);
   _beliefs(2) = 1.0f;
   _adaptationRate = 100.0f;
 
-  _e1 << 0.0f, 0.0f, -1.0f;
+  _n << 0.0f, 0.0f, -1.0f;
 
   _targetForce = 10.0f;
   _sigmaH =0.0f;
@@ -121,27 +123,27 @@ FalconControl::FalconControl(ros::NodeHandle &n, double frequency, std::string f
 bool FalconControl::init() 
 {
   // Subscriber definitions
-  _subRobotPose = _n.subscribe("/lwr/ee_pose", 1, &FalconControl::updateRobotPose, this, ros::TransportHints().reliable().tcpNoDelay());
-  _subRobotTwist = _n.subscribe("/lwr/joint_controllers/twist", 1, &FalconControl::updateRobotTwist, this, ros::TransportHints().reliable().tcpNoDelay());
-  _subForceTorqueSensor = _n.subscribe("/ft_sensor/netft_data", 1, &FalconControl::updateRobotWrench, this, ros::TransportHints().reliable().tcpNoDelay());
-   _subOptitrackPose[ROBOT_BASIS_LEFT] = _n.subscribe<geometry_msgs::PoseStamped>("/optitrack/robot_left/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,ROBOT_BASIS_LEFT),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
-  _subOptitrackPose[ROBOT_BASIS_RIGHT] = _n.subscribe<geometry_msgs::PoseStamped>("/optitrack/robot_right/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,ROBOT_BASIS_RIGHT),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
-  _subOptitrackPose[P1] = _n.subscribe<geometry_msgs::PoseStamped>("/optitrack/p1/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,P1),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
-  _subOptitrackPose[P2] = _n.subscribe<geometry_msgs::PoseStamped>("/optitrack/p2/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,P2),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
-  _subOptitrackPose[P3] = _n.subscribe<geometry_msgs::PoseStamped>("/optitrack/p3/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,P3),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
-  _subOptitrackPose[P4] = _n.subscribe<geometry_msgs::PoseStamped>("/optitrack/p4/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,P4),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
-  _subDampingMatrix = _n.subscribe("/lwr/joint_controllers/passive_ds_damping_matrix", 1, &FalconControl::updateDampingMatrix,this,ros::TransportHints().reliable().tcpNoDelay());
-  _subFalconPosition = _n.subscribe<geometry_msgs::PoseStamped>("/falcon/position",1,&FalconControl::updateFalconPosition, this, ros::TransportHints().reliable().tcpNoDelay());
-  _subFalconVelocity = _n.subscribe<geometry_msgs::TwistStamped>("/falcon/velocity",1,&FalconControl::updateFalconVelocity, this, ros::TransportHints().reliable().tcpNoDelay());
-  _subFalconButtons = _n.subscribe<std_msgs::UInt32>("/falcon/buttons",1,&FalconControl::updateFalconButtons, this, ros::TransportHints().reliable().tcpNoDelay());
+  _subRobotPose = _nh.subscribe("/lwr/ee_pose", 1, &FalconControl::updateRobotPose, this, ros::TransportHints().reliable().tcpNoDelay());
+  _subRobotTwist = _nh.subscribe("/lwr/joint_controllers/twist", 1, &FalconControl::updateRobotTwist, this, ros::TransportHints().reliable().tcpNoDelay());
+  _subForceTorqueSensor = _nh.subscribe("/ft_sensor/netft_data", 1, &FalconControl::updateRobotWrench, this, ros::TransportHints().reliable().tcpNoDelay());
+   _subOptitrackPose[ROBOT_BASIS_LEFT] = _nh.subscribe<geometry_msgs::PoseStamped>("/optitrack/robot_left/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,ROBOT_BASIS_LEFT),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
+  _subOptitrackPose[ROBOT_BASIS_RIGHT] = _nh.subscribe<geometry_msgs::PoseStamped>("/optitrack/robot_right/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,ROBOT_BASIS_RIGHT),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
+  _subOptitrackPose[P1] = _nh.subscribe<geometry_msgs::PoseStamped>("/optitrack/p1/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,P1),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
+  _subOptitrackPose[P2] = _nh.subscribe<geometry_msgs::PoseStamped>("/optitrack/p2/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,P2),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
+  _subOptitrackPose[P3] = _nh.subscribe<geometry_msgs::PoseStamped>("/optitrack/p3/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,P3),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
+  _subOptitrackPose[P4] = _nh.subscribe<geometry_msgs::PoseStamped>("/optitrack/p4/pose", 1, boost::bind(&FalconControl::updateOptitrackPose,this,_1,P4),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
+  _subDampingMatrix = _nh.subscribe("/lwr/joint_controllers/passive_ds_damping_matrix", 1, &FalconControl::updateDampingMatrix,this,ros::TransportHints().reliable().tcpNoDelay());
+  _subFalconPosition = _nh.subscribe<geometry_msgs::PoseStamped>("/falcon/position",1,&FalconControl::updateFalconPosition, this, ros::TransportHints().reliable().tcpNoDelay());
+  _subFalconVelocity = _nh.subscribe<geometry_msgs::TwistStamped>("/falcon/velocity",1,&FalconControl::updateFalconVelocity, this, ros::TransportHints().reliable().tcpNoDelay());
+  _subFalconButtons = _nh.subscribe<std_msgs::UInt32>("/falcon/buttons",1,&FalconControl::updateFalconButtons, this, ros::TransportHints().reliable().tcpNoDelay());
 
   // Publisher definitions
-  _pubDesiredTwist = _n.advertise<geometry_msgs::Twist>("/lwr/joint_controllers/passive_ds_command_vel", 1);
-  _pubDesiredOrientation = _n.advertise<geometry_msgs::Quaternion>("/lwr/joint_controllers/passive_ds_command_orient", 1);
-  _pubFilteredWrench = _n.advertise<geometry_msgs::WrenchStamped>("FalconControl/filteredWrench", 1);
-  _pubTaskAttractor = _n.advertise<geometry_msgs::PointStamped>("FalconControl/taskAttractor", 1);  
-  _pubNormalForce = _n.advertise<std_msgs::Float32>("FalconControl/normalForce", 1);
-  _pubFalconForce = _n.advertise<geometry_msgs::WrenchStamped>("/falcon/force_desired", 1);
+  _pubDesiredTwist = _nh.advertise<geometry_msgs::Twist>("/lwr/joint_controllers/passive_ds_command_vel", 1);
+  _pubDesiredOrientation = _nh.advertise<geometry_msgs::Quaternion>("/lwr/joint_controllers/passive_ds_command_orient", 1);
+  _pubFilteredWrench = _nh.advertise<geometry_msgs::WrenchStamped>("FalconControl/filteredWrench", 1);
+  _pubTaskAttractor = _nh.advertise<geometry_msgs::PointStamped>("FalconControl/taskAttractor", 1);  
+  _pubNormalForce = _nh.advertise<std_msgs::Float32>("FalconControl/normalForce", 1);
+  _pubFalconForce = _nh.advertise<geometry_msgs::WrenchStamped>("/falcon/force_desired", 1);
 
   // Dynamic reconfigure definition
   _dynRecCallback = boost::bind(&FalconControl::dynamicReconfigureCallback, this, _1, _2);
@@ -152,13 +154,13 @@ bool FalconControl::init()
   _outputFile.open(ros::package::getPath(std::string("robot_shared_control"))+"/data_falcon/"+_filename+".txt");
 
 
-  if(!_n.getParamCached("/lwr/ds_param/damping_eigval0",_d1))
+  if(!_nh.getParamCached("/lwr/ds_param/damping_eigval0",_d1))
   {
     ROS_ERROR("[FalconControl]: Cannot read first eigen value of passive ds controller");
     return false;
   }
 
-  if (_n.ok()) 
+  if (_nh.ok()) 
   { 
     // Wait for poses being published
     ros::spinOnce();
@@ -246,10 +248,13 @@ void FalconControl::computeCommand()
   // }
 
   // Compute adapted task
+  Eigen::Vector3f temp;
   _fx.setConstant(0.0f);
+  temp.setConstant(0.0f);
   for(int k = 0; k < NB_TASKS; k++)
   {
     _fx+=_beliefs[k]*_fxk[k];
+    temp += _Fdk[k]*_nk[k];
   }
 
   // Compute desired contact force profile from task adaptation
@@ -263,64 +268,40 @@ void FalconControl::computeCommand()
   //   _Fd = 0.0f;
   // }
 
-  Eigen::MatrixXf::Index indexMax;
-  float bmax = _beliefs.array().maxCoeff(&indexMax);
-  if(fabs(1.0-bmax)< FLT_EPSILON /*&& _beliefs[NB_TASKS-1]>0.5f*/)
-  {
-    _Fd = _Fdk[indexMax];
-  }
-  else
-  {
-    // _Fd = 0.0f;
-    _Fd = _Fdk[indexMax];
-  }
-  forceAdaptation();
-  // Compute force scaling using contact force adaptation
-
   // Eigen::MatrixXf::Index indexMax;
-  // if(fabs(1.0f-_beliefs.array().maxCoeff(&indexMax))<FLT_EPSILON)
+  // float bmax = _beliefs.array().maxCoeff(&indexMax);
+  // if(fabs(1.0-bmax)< FLT_EPSILON && _beliefs[NB_TASKS-1]>0.5f)
   // {
   //   _Fd = _Fdk[indexMax];
-  //    if(_buttonsFalcon == (int) CENTER)
-  //    {
-  //     _sigmaH += 5.0f*_dt*_vM.dot(_e1);
-  //     if(_sigmaH>1)
-  //     {
-  //       _sigmaH = 1.0f;
-  //     }
-  //     else if(_sigmaH<0.0f)
-  //     {
-  //       _sigmaH = 0.0f;
-  //     }
-  //   }
-  //   _Fd*=(1+_sigmaH);
   // }
   // else
   // {
-  //   _Fd = 0.0f;
-  //   _sigmaH = 0.0f;
+  //   // _Fd = 0.0f;
+  //   _Fd = _Fdk[indexMax];
   // }
-  // std::cerr << "dBeliefs: " << _dbeliefs.transpose() << std::endl;
-  // std::cerr << "vM: " << _vM.transpose() << std::endl;
-  std::cerr << "beliefs: " << _beliefs.transpose() << std::endl;
+
+  if(temp.norm()<FLT_EPSILON)
+  {
+    _Fd = 0.0f;
+    _n.setConstant(0.0f);
+  }
+  else
+  {
+    _Fd = temp.norm();
+    _n = temp.normalized();
+  }
+
+  Eigen::Vector3f F = _filteredWrench.segment(0,3);
+  _normalForce = _n.dot(-_wRb*F);
+
+
+  forceAdaptation();
+  // Compute force scaling using contact force adaptation
+
+
+  std::cerr << "Fd: " << _Fd*_n.transpose() << std::endl;
+  std::cerr << "F: "<< F.norm() << " beliefs: " << _beliefs.transpose() << std::endl;
   std::cerr << "h: " << _h << " E: " << _E << " sigma: " << _sigma << std::endl;
-  // _vd = _vh;
-  // _vd.setConstant(0.0f);
-  // _vd = _fx;
-  //   if(_vd.norm()>_velocityLimit)
-  //   {
-  //     _vd *= _velocityLimit/_vd.norm();
-  //   }
-
-  // std::cerr << "Falcon button: " << (int) _buttonsFalcon << std::endl;
-  // std::cerr << "Robot desired velocity: " <<_vd.transpose() << " " << _vd.norm() << std::endl;
-
-  // // Update surface info
-  // updateSurfaceInformation();
-
-  // // Compute nominal DS
-  // computeNominalDS();
-
   // // Compute modulated DS
   computeModulatedDS();
     
@@ -341,13 +322,13 @@ void FalconControl::updateIndividualTasks()
   {
     if(k<NB_TASKS-1)
     {
-    _fxk[k] = _xAttractor[k]-_x;
-    _Fdk[k] = 0.0f;      
+      _fxk[k] = _xAttractor[k]-_x;
+      _Fdk[k] = 0.0f;      
     }
   }
 
   Eigen::Vector3f F = _filteredWrench.segment(0,3);
-  _normalForce = _e1.dot(-_wRb*F);
+  _normalForce = _n.dot(-_wRb*F);
 
   _normalDistance = _x(2)-_xAttractor[0](2);
   if(_normalDistance<0)
@@ -357,6 +338,7 @@ void FalconControl::updateIndividualTasks()
   }
   // std::cerr << _normalDistance << std::endl;
   _Fdk[0] = (1.0f-std::tanh(20*_normalDistance))*_targetForce;
+  _nk[0] << 0.0f, 0.0f, -1.0f;
 //   float alpha;
 //   if(_targetForce*alpha>4)
 //   {
@@ -381,61 +363,109 @@ void FalconControl::updateIndividualTasks()
 void FalconControl::taskAdaptation()
 {
   _fx.setConstant(0.0f);
+  Eigen::Vector3f temp;
+  temp.setConstant(0.0f);
   for(int k = 0; k < NB_TASKS; k++)
   {
     _fx+=_beliefs[k]*_fxk[k];
+    temp += _Fdk[k]*_nk[k];
   }
 
-  Eigen::MatrixXf::Index indexMax;
-  float bmax = _beliefs.array().maxCoeff(&indexMax);
-  if(fabs(1.0-bmax)< FLT_EPSILON /*&& _beliefs[NB_TASKS-1]>0.5f*/)
+  if(temp.norm()<FLT_EPSILON)
   {
-    _Fd = _Fdk[indexMax];
+    _Fd = 0.0f;
+    _n.setConstant(0.0f);
   }
   else
   {
-    _Fd = _Fdk[indexMax];
+    _Fd = temp.norm();
+    _n = temp.normalized();
   }
+
+  Eigen::Vector3f F = -_wRb*_filteredWrench.segment(0,3);
+
+  float efk[NB_TASKS];
+  float ef = 0.0f;
+  Eigen::Vector3f Ftk;
+  std::cerr << "ef: "; 
+  for(int k = 0; k < NB_TASKS; k++)
+  {
+    Ftk = (Eigen::Matrix3f::Identity()-_nk[k]*_nk[k].transpose())*F;
+    efk[k] = F.dot(_nk[k])-_Fdk[k]+Ftk.norm();
+    ef += _beliefs[k]*efk[k];
+    std::cerr << efk[k] << " ";
+  }
+  std::cerr << ef << std::endl;
+
+  // Eigen::MatrixXf::Index indexMax;
+  // float bmax = _beliefs.array().maxCoeff(&indexMax);
+  // if(fabs(1.0-bmax)< FLT_EPSILON /*&& _beliefs[NB_TASKS-1]>0.5f*/)
+  // {
+  //   _Fd = _Fdk[indexMax];
+  // }
+  // else
+  // {
+  //   _Fd = _Fdk[indexMax];
+  // }
+
   // std::cerr << _Fd << std::endl;
   // Eigen::Vector3f vhf;
   // vhf = _vh;
-  // if(fabs(vhf.dot(_e1))<0.05f)
+  // if(fabs(vhf.dot(_n))<0.05f)
   // {
   //   vhf.setConstant(0.0f);
   // }
 
-  for(int k = 0; k < NB_TASKS-1; k++)
-  {
-    _dbeliefs[k] = _adaptationRate*(_sigma*(_vh-_fx).dot(_fxk[k])+(_beliefs[k]-0.5f)*_fxk[k].squaredNorm());
-    // std::cerr << k << " " << (_vh-_fx).dot(_fxk[k]) << " " <<(_beliefs[k]-0.5f)*_fxk[k].squaredNorm() <<std::endl;
-  }
   float efmax = 5.0f;
   float efmin = -8.0f;
-  float ef = (_normalForce-2*_h*_Fd);
-  float g = 0.0f;
+  float U = 0.0f;
   if(ef > efmax)
   {
-    g = (ef-efmax)*(ef-efmax);
+    U = (ef-efmax)*(ef-efmax);
   }
   else if(ef < efmin)
   {
-    g = (ef-efmin)*(ef-efmin);
+    U = (ef-efmin)*(ef-efmin);
   }
   else 
   {
-    g = 0.0f;
+    U = 0.0f;
   }
+
+  Eigen::Matrix<float,NB_TASKS,1> _dbeliefsF;
+  _dbeliefsF.setConstant(0.0f);
+  for(int k = 0; k < NB_TASKS-1; k++)
+  {
+    _dbeliefs[k] = _adaptationRate*(_sigma*(_vh-_fx).dot(_fxk[k])+(_beliefs[k]-0.5f)*_fxk[k].squaredNorm());
+
+    if(ef > efmax)
+    {
+      _dbeliefsF[k] = -_beliefs[NB_TASKS-1]*(ef-efmax)*efk[k];
+    }
+    else if(ef < efmin)
+    {
+      _dbeliefsF[k] = -_beliefs[NB_TASKS-1]*(ef-efmin)*efk[k];
+    }
+    else 
+    {
+      _dbeliefsF[k] = 0.0f;
+    }
+
+    // std::cerr << k << " " << (_vh-_fx).dot(_fxk[k]) << " " <<(_beliefs[k]-0.5f)*_fxk[k].squaredNorm() <<std::endl;
+  }
+  _dbeliefs+=_dbeliefsF;
   // _dbeliefs[NB_TASKS-1] = _beliefs[NB_TASKS-1]-0.5+(_normalForce-_Fd)*(_normalForce-_Fd);
   // std::cerr << _beliefs[NB_TASKS-1]-0.5 << " " << (_normalForce-_Fd)*(_normalForce-_Fd) << std::endl;
 
 
-  _dbeliefs[NB_TASKS-1] = (_beliefs[NB_TASKS-1]-0.5)+g;
+  _dbeliefs[NB_TASKS-1] = (_beliefs[NB_TASKS-1]-0.5)+U;
   // _dbeliefs[NB_TASKS-1] = -100;
-  std::cerr << _beliefs[NB_TASKS-1]-0.5 << " " << g << std::endl;
+  std::cerr << _beliefs[NB_TASKS-1]-0.5 << " " << U << std::endl;
 
+  std::cerr << "dBeliefsF: " << _dbeliefsF.transpose() << std::endl;
   std::cerr << "dBeliefs: " << _dbeliefs.transpose() << std::endl;
 
-  // Eigen::MatrixXf::Index indexMax;
+  Eigen::MatrixXf::Index indexMax;
   float dbmax = _dbeliefs.array().maxCoeff(&indexMax);
   if(std::fabs(1.0f-_beliefs(indexMax))< FLT_EPSILON && std::fabs(_beliefs.sum()-1)<FLT_EPSILON)
   {
@@ -503,7 +533,7 @@ void FalconControl::forceAdaptation()
   }
   Eigen::Vector3f vhf;
   vhf = _vh;
-  if(fabs(vhf.dot(_e1))<0.05f)
+  if(fabs(vhf.dot(_n))<0.05f)
   {
     vhf.setConstant(0.0f);
   }
@@ -511,8 +541,8 @@ void FalconControl::forceAdaptation()
 
   float alpha;
   Eigen::Vector3f F = _filteredWrench.segment(0,3);
-  _normalForce = std::fabs(_e1.dot(-_wRb*F));
-  if(vhf.dot(_e1)> -FLT_EPSILON)
+  _normalForce = std::fabs(_n.dot(-_wRb*F));
+  if(vhf.dot(_n)> -FLT_EPSILON)
   {
     alpha = 1.0f-std::min(_normalForce/12.0f,1.0f);
   } 
@@ -523,7 +553,7 @@ void FalconControl::forceAdaptation()
 
   // std::cerr << "alpha: " << alpha << " normal distance: " << _normalDistance <<  std::endl;
 
-  dE = alpha*vhf.dot(_Fd*_e1)+k*(_Et-_E);
+  dE = alpha*vhf.dot(_Fd*_n)+k*(_Et-_E);
 
   _E += _tankRate*dE*_dt;
 
@@ -542,7 +572,7 @@ void FalconControl::forceAdaptation()
 
   // if(fabs(_Fd)>FLT_EPSILON && fabs(1.0f-_beliefs.segment(0,NB_TASKS-1).array().maxCoeff(&indexMax))<FLT_EPSILON)
   // if(fabs(_Fd)>FLT_EPSILON && _beliefs[NB_TASKS-1] < 0.5f)
-  // std::cerr << "power: " << _Fd*_e1.dot(_fx) << std::endl;
+  // std::cerr << "power: " << _Fd*_n.dot(_fx) << std::endl;
   // if(fabs(_Fd)>FLT_EPSILON)
   // if(fabs(_Fd)>FLT_EPSILON)
   {
@@ -638,7 +668,7 @@ void FalconControl::computeModulatedDS()
   float _scaledFd = 2.0f*_h*_Fd;
 
   // Compute modulation gain
-  float delta = std::pow(2.0f*_e1.dot(_fx)*_gammap*_scaledFd/_d1,2.0f)+4.0f*std::pow(_fx.norm(),4.0f); 
+  float delta = std::pow(2.0f*_n.dot(_fx)*_gammap*_scaledFd/_d1,2.0f)+4.0f*std::pow(_fx.norm(),4.0f); 
   float la;
   if(fabs(_fx.norm())<FLT_EPSILON)
   {
@@ -646,7 +676,7 @@ void FalconControl::computeModulatedDS()
   }
   else
   {
-    la = (-2.0f*_e1.dot(_fx)*_gammap*_scaledFd/_d1+sqrt(delta))/(2.0f*std::pow(_fx.norm(),2.0f));
+    la = (-2.0f*_n.dot(_fx)*_gammap*_scaledFd/_d1+sqrt(delta))/(2.0f*std::pow(_fx.norm(),2.0f));
   }
 
   // if(_s < 0.0f && _pn < 0.0f)
@@ -675,7 +705,7 @@ void FalconControl::computeModulatedDS()
   // _dW = (la-1.0f)*(1-_beta)*_pn+(_gammap-_gamma)*_pf-(1-_alpha)*_pd;
 
   // Compute modulated DS
-  _vd = la*_fx+_gammap*_scaledFd*_e1/_d1;
+  _vd = la*_fx+_gammap*_scaledFd*_n/_d1;
 
   std::cerr << "[FalconControl]: F: " << _normalForce << " Fd:  " << _Fd << " Fdh:  " << _scaledFd << " ||fx||: " << _fx.norm() << std::endl;
   // std::cerr << "[FalconControl]: la: " << la << " vd: " << _vd.norm() << std::endl;
@@ -759,7 +789,7 @@ void FalconControl::logData()
               << _v.transpose() << " "
               << _fx.transpose() << " "
               << _vd.transpose() << " "
-              << _e1.transpose() << " "
+              << _n.transpose() << " "
               << _wRb.col(2).transpose() << " "
               << _normalDistance << " "
               << _normalForce << " "

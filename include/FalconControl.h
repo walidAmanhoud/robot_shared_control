@@ -44,7 +44,7 @@ class FalconControl
 
 	private:
 		// ROS variables
-		ros::NodeHandle _n;
+		ros::NodeHandle _nh;
 		ros::Rate _loopRate;
 		float _dt;
 
@@ -106,7 +106,7 @@ class FalconControl
 		// Task variables
     Eigen::Vector3f _taskAttractor;				// Attractor position [m] (3x1)
     Eigen::Vector3f _planeNormal;					// Normal vector to the surface (pointing outside the surface) (3x1)
-    Eigen::Vector3f _e1;									// Normal vector to the surface (pointing towards the surface) (3x1)
+    Eigen::Vector3f _n;									// Normal vector to the surface (pointing towards the surface) (3x1)
     Eigen::Vector3f _p;										// Point on the surface [m] (3x1)
     Eigen::Vector3f _xProj;								// Vertical projection on the surface [m] (3x1)
     Eigen::Matrix3f _wRs;									// Orientation matrix from surface frame to world frame
@@ -130,6 +130,7 @@ class FalconControl
    	Eigen::Matrix<float,NB_TASKS,1> _beliefs;
    	Eigen::Matrix<float,NB_TASKS,1> _dbeliefs;   	
    	Eigen::Vector3f _fxk[NB_TASKS];
+   	Eigen::Vector3f _nk[NB_TASKS];
    	float _Fdk[NB_TASKS];
    	float _adaptationRate;
 
