@@ -90,6 +90,7 @@ class FalconControl
 		Eigen::Matrix<float,6,1> _wrench;						// Wrench [N and Nm] (6x1)
 		Eigen::Matrix<float,6,1> _wrenchBias;				// Wrench bias [N and Nm] (6x1)
 		Eigen::Matrix<float,6,1> _filteredWrench;		// Filtered wrench [N and Nm] (6x1)
+		Eigen::Vector3f _F;													// Measured end effector forces in robot frame [N and Nm] (3x1)
     float _normalDistance;											// Normal distance to the surface [m]
     float _normalForce;													// Normal force to the surface [N]
 
@@ -182,14 +183,9 @@ class FalconControl
     double _duration;						// Duration of an experiment [s]
 
     // Force adaptation vaariable
-    float _E;
-    float _Et;
-    float _Emin;
-    float _Emax;
-    float _epsilon;
     float _sigma;
     float _h;
-    float _tankRate;
+    float _hRate;
 
 		// Other variables
     double _timeInit;

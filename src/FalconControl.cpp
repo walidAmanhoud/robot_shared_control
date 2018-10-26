@@ -100,22 +100,16 @@ FalconControl::FalconControl(ros::NodeHandle &n, double frequency, std::string f
   }
   _fx.setConstant(0.0f);
   _beliefs(2) = 1.0f;
-  _adaptationRate = 100.0f;
+  _adaptationRate = 50.0f;
 
   _n << 0.0f, 0.0f, -1.0f;
 
   _targetForce = 10.0f;
   _sigmaH =0.0f;
 
-  _Emin = 0.0f;
-  _Emax = 3.0f;
-  _Et = (_Emin+_Emax)/2.0f;
-  _Et = 0.0f;
-  _E = _Et;
-  _epsilon = 2.0f;
-  _h = (_E-_Emin)/(_Emax-_Emin);
+  _h = 0.0f;
   _sigma = 1.0f;
-  _tankRate = 0.5f;
+  _hRate = 0.1f;
 
 }
 
@@ -238,14 +232,13 @@ void FalconControl::computeCommand()
 
   positionVelocityMapping();
 
+  _F = -_wRb*_filteredWrench.segment(0,3);
+
   // Update individual
   updateIndividualTasks();
 
   // Update tasks' beliefs using task adaptation
-  // if(_buttonsFalcon != (int) CENTER)
-  // {
-    taskAdaptation();
-  // }
+  taskAdaptation();
 
   // Compute adapted task
   Eigen::Vector3f temp;
@@ -254,31 +247,8 @@ void FalconControl::computeCommand()
   for(int k = 0; k < NB_TASKS; k++)
   {
     _fx+=_beliefs[k]*_fxk[k];
-    temp += _Fdk[k]*_nk[k];
+    temp += _beliefs[k]*_Fdk[k]*_nk[k];
   }
-
-  // Compute desired contact force profile from task adaptation
-  // Eigen::MatrixXf::Index indexMax;
-  // if(fabs(1.0f-_beliefs.array().maxCoeff(&indexMax))<FLT_EPSILON)
-  // {
-  //   _Fd = _Fdk[indexMax];
-  // }
-  // else
-  // {
-  //   _Fd = 0.0f;
-  // }
-
-  // Eigen::MatrixXf::Index indexMax;
-  // float bmax = _beliefs.array().maxCoeff(&indexMax);
-  // if(fabs(1.0-bmax)< FLT_EPSILON && _beliefs[NB_TASKS-1]>0.5f)
-  // {
-  //   _Fd = _Fdk[indexMax];
-  // }
-  // else
-  // {
-  //   // _Fd = 0.0f;
-  //   _Fd = _Fdk[indexMax];
-  // }
 
   if(temp.norm()<FLT_EPSILON)
   {
@@ -291,17 +261,14 @@ void FalconControl::computeCommand()
     _n = temp.normalized();
   }
 
-  Eigen::Vector3f F = _filteredWrench.segment(0,3);
-  _normalForce = _n.dot(-_wRb*F);
-
 
   forceAdaptation();
   // Compute force scaling using contact force adaptation
 
 
-  std::cerr << "Fd: " << _Fd*_n.transpose() << std::endl;
-  std::cerr << "F: "<< F.norm() << " beliefs: " << _beliefs.transpose() << std::endl;
-  std::cerr << "h: " << _h << " E: " << _E << " sigma: " << _sigma << std::endl;
+  // std::cerr << "Fd: " << _Fd*_n.transpose() << std::endl;
+  std::cerr << "beliefs: " << _beliefs.transpose() << std::endl;
+  std::cerr << "h: " << _h << " sigma: " << _sigma << std::endl;
   // // Compute modulated DS
   computeModulatedDS();
     
@@ -327,36 +294,15 @@ void FalconControl::updateIndividualTasks()
     }
   }
 
-  Eigen::Vector3f F = _filteredWrench.segment(0,3);
-  _normalForce = _n.dot(-_wRb*F);
-
   _normalDistance = _x(2)-_xAttractor[0](2);
   if(_normalDistance<0)
   {
     _normalDistance = 0.0f;
-    // Compute desired force profile
   }
-  // std::cerr << _normalDistance << std::endl;
+  
+  // Compute desired force profile
   _Fdk[0] = (1.0f-std::tanh(20*_normalDistance))*_targetForce;
   _nk[0] << 0.0f, 0.0f, -1.0f;
-//   float alpha;
-//   if(_targetForce*alpha>4)
-//   {
-//     _Fdk[0]  = _targetForce
-//   }
-//   else
-// {
-
-// }
-//   _Fdk[0] = Utils::smoothFall(_normalDistance,0.02,0.1f)*_targetForce;
-  // if(_normalForce<3.0f)
-  // {
-  //   _Fdk[0] = 3.0f;
-  // }
-  // else
-  // {
-  //   _Fdk[0] = _targetForce;
-  // }
 
 }
 
@@ -368,7 +314,7 @@ void FalconControl::taskAdaptation()
   for(int k = 0; k < NB_TASKS; k++)
   {
     _fx+=_beliefs[k]*_fxk[k];
-    temp += _Fdk[k]*_nk[k];
+    temp += _beliefs[k]*_Fdk[k]*_nk[k];
   }
 
   if(temp.norm()<FLT_EPSILON)
@@ -382,40 +328,22 @@ void FalconControl::taskAdaptation()
     _n = temp.normalized();
   }
 
-  Eigen::Vector3f F = -_wRb*_filteredWrench.segment(0,3);
 
-  float efk[NB_TASKS];
-  float ef = 0.0f;
-  Eigen::Vector3f Ftk;
-  std::cerr << "ef: "; 
-  for(int k = 0; k < NB_TASKS; k++)
-  {
-    Ftk = (Eigen::Matrix3f::Identity()-_nk[k]*_nk[k].transpose())*F;
-    efk[k] = F.dot(_nk[k])-_Fdk[k]+Ftk.norm();
-    ef += _beliefs[k]*efk[k];
-    std::cerr << efk[k] << " ";
-  }
-  std::cerr << ef << std::endl;
-
-  // Eigen::MatrixXf::Index indexMax;
-  // float bmax = _beliefs.array().maxCoeff(&indexMax);
-  // if(fabs(1.0-bmax)< FLT_EPSILON /*&& _beliefs[NB_TASKS-1]>0.5f*/)
+  // float efk[NB_TASKS];
+  // float ef = 0.0f;
+  // Eigen::Vector3f Ftk;
+  // // std::cerr << "ef: "; 
+  // for(int k = 0; k < NB_TASKS; k++)
   // {
-  //   _Fd = _Fdk[indexMax];
+  //   Ftk = (Eigen::Matrix3f::Identity()-_nk[k]*_nk[k].transpose())*_F;
+  //   // efk[k] = F.dot(_nk[k])-2*_h*_Fdk[k]+Ftk.norm();
+  //   efk[k] = _F.norm()-2*_h*_Fdk[k];
+  //   ef += _beliefs[k]*efk[k];
+  //   // std::cerr << efk[k] << " ";
   // }
-  // else
-  // {
-  //   _Fd = _Fdk[indexMax];
-  // }
-
-  // std::cerr << _Fd << std::endl;
-  // Eigen::Vector3f vhf;
-  // vhf = _vh;
-  // if(fabs(vhf.dot(_n))<0.05f)
-  // {
-  //   vhf.setConstant(0.0f);
-  // }
-
+  Eigen::MatrixXf::Index indexMax;
+  float bmax = _beliefs.array().maxCoeff(&indexMax);
+  float ef = _F.norm()-2*_h*_Fdk[indexMax];
   float efmax = 5.0f;
   float efmin = -8.0f;
   float U = 0.0f;
@@ -432,40 +360,69 @@ void FalconControl::taskAdaptation()
     U = 0.0f;
   }
 
+  float efk[NB_TASKS];
+  float Uk[NB_TASKS];
+  U = 0.0f;
+  for(int k = 0; k < NB_TASKS; k++)
+  {
+    efk[k] = _F.norm()-2*_h*_Fdk[k];
+    if(efk[k] > efmax)
+    {
+      Uk[k] = (efk[k]-efmax)*(efk[k]-efmax);
+    }
+    else if(efk[k] < efmin)
+    {
+      Uk[k] = (efk[k]-efmin)*(efk[k]-efmin);
+    }
+    else 
+    {
+      Uk[k] = 0.0f;
+    }
+    U+=_beliefs[k]*Uk[k];
+  }
+  // Eigen::Vector3f vhf;
+  // vhf = _vh;
+  // if(_vh.norm()<0.05f)
+  // {
+  //   vhf.setConstant(0.0f);
+  // }
+
+
   Eigen::Matrix<float,NB_TASKS,1> _dbeliefsF;
   _dbeliefsF.setConstant(0.0f);
   for(int k = 0; k < NB_TASKS-1; k++)
   {
-    _dbeliefs[k] = _adaptationRate*(_sigma*(_vh-_fx).dot(_fxk[k])+(_beliefs[k]-0.5f)*_fxk[k].squaredNorm());
+    _dbeliefs[k] = _adaptationRate*(_sigma*(_vh-_fx).dot(_fxk[k])+(_beliefs[k]-0.5f)*_fxk[k].squaredNorm())-U;
 
-    if(ef > efmax)
-    {
-      _dbeliefsF[k] = -_beliefs[NB_TASKS-1]*(ef-efmax)*efk[k];
-    }
-    else if(ef < efmin)
-    {
-      _dbeliefsF[k] = -_beliefs[NB_TASKS-1]*(ef-efmin)*efk[k];
-    }
-    else 
-    {
-      _dbeliefsF[k] = 0.0f;
-    }
+    // if(ef > efmax)
+    // {
+    //   _dbeliefsF[k] = -_beliefs[NB_TASKS-1]*(ef-efmax)*efk[k];
+    // }
+    // else if(ef < efmin)
+    // {
+    //   _dbeliefsF[k] = -_beliefs[NB_TASKS-1]*(ef-efmin)*efk[k];
+    // }
+    // else 
+    // {
+    //   _dbeliefsF[k] = 0.0f;
+    // }
+    _dbeliefsF[k] = -(1-_beliefs[NB_TASKS-1])*Uk[k];
 
     // std::cerr << k << " " << (_vh-_fx).dot(_fxk[k]) << " " <<(_beliefs[k]-0.5f)*_fxk[k].squaredNorm() <<std::endl;
   }
-  _dbeliefs+=_dbeliefsF;
+  // _dbeliefs+=_dbeliefsF;
   // _dbeliefs[NB_TASKS-1] = _beliefs[NB_TASKS-1]-0.5+(_normalForce-_Fd)*(_normalForce-_Fd);
   // std::cerr << _beliefs[NB_TASKS-1]-0.5 << " " << (_normalForce-_Fd)*(_normalForce-_Fd) << std::endl;
 
 
   _dbeliefs[NB_TASKS-1] = (_beliefs[NB_TASKS-1]-0.5)+U;
   // _dbeliefs[NB_TASKS-1] = -100;
-  std::cerr << _beliefs[NB_TASKS-1]-0.5 << " " << U << std::endl;
+  // std::cerr << _beliefs[NB_TASKS-1]-0.5 << " " << U << std::endl;
 
-  std::cerr << "dBeliefsF: " << _dbeliefsF.transpose() << std::endl;
+  // std::cerr << "dBeliefsF: " << _dbeliefsF.transpose() << std::endl;
   std::cerr << "dBeliefs: " << _dbeliefs.transpose() << std::endl;
 
-  Eigen::MatrixXf::Index indexMax;
+  // Eigen::MatrixXf::Index indexMax;
   float dbmax = _dbeliefs.array().maxCoeff(&indexMax);
   if(std::fabs(1.0f-_beliefs(indexMax))< FLT_EPSILON && std::fabs(_beliefs.sum()-1)<FLT_EPSILON)
   {
@@ -521,16 +478,6 @@ void FalconControl::taskAdaptation()
 
 void FalconControl::forceAdaptation()
 {
-  float k;
-  float dE;
-  if(fabs(_Fd)<FLT_EPSILON)
-  {
-    k = 2.0f;
-  }
-  else
-  {
-    k = 0.0f;
-  }
   Eigen::Vector3f vhf;
   vhf = _vh;
   if(fabs(vhf.dot(_n))<0.05f)
@@ -538,50 +485,43 @@ void FalconControl::forceAdaptation()
     vhf.setConstant(0.0f);
   }
 
-
-  float alpha;
-  Eigen::Vector3f F = _filteredWrench.segment(0,3);
-  _normalForce = std::fabs(_n.dot(-_wRb*F));
+  float k1;
+  _normalForce = std::fabs(_n.dot(_F));
   if(vhf.dot(_n)> -FLT_EPSILON)
   {
-    alpha = 1.0f-std::min(_normalForce/12.0f,1.0f);
+    k1 = 1.0f-std::min(_normalForce/12.0f,1.0f);
   } 
   else
   {
-    alpha = 1.0f;
+    k1 = 1.0f;
   }
 
-  // std::cerr << "alpha: " << alpha << " normal distance: " << _normalDistance <<  std::endl;
-
-  dE = alpha*vhf.dot(_Fd*_n)+k*(_Et-_E);
-
-  _E += _tankRate*dE*_dt;
-
-  if(_E<_Emin)
+  float k2;
+  if(fabs(_Fd)<FLT_EPSILON)
   {
-    _E = _Emin;
+    k2 = 10.0f;
   }
-  else if(_E > _Emax)
+  else
   {
-    _E = _Emax;
+    k2 = 0.0f;
   }
+  // std::cerr << "k1: " << k1 << " normal distance: " << _normalDistance <<  std::endl;
 
-  _h = (_E-_Emin)/(_Emax-_Emin);
+  float dh;
+  dh = k1*vhf.dot(_Fd*_n)-k2*_h;
 
-  Eigen::MatrixXf::Index indexMax;
+  _h += _hRate*dh*_dt;
 
-  // if(fabs(_Fd)>FLT_EPSILON && fabs(1.0f-_beliefs.segment(0,NB_TASKS-1).array().maxCoeff(&indexMax))<FLT_EPSILON)
-  // if(fabs(_Fd)>FLT_EPSILON && _beliefs[NB_TASKS-1] < 0.5f)
-  // std::cerr << "power: " << _Fd*_n.dot(_fx) << std::endl;
-  // if(fabs(_Fd)>FLT_EPSILON)
-  // if(fabs(_Fd)>FLT_EPSILON)
+  if(_h<0.0f)
   {
-    _sigma = Utils::smoothFall(_h,0.0f,0.5f);
+    _h = 0.0f;
   }
-  // else
-  // {
-  //   _sigma = 1.0f;
-  // }
+  else if(_h>1.0f)
+  {
+    _h = 1.0f;
+  }
+
+  _sigma = Utils::smoothFall(_h,0.0f,0.5f);
 }
 
 
@@ -674,6 +614,10 @@ void FalconControl::computeModulatedDS()
   {
     la = 0.0f;
   }
+  else if (_n.dot(_fx) < FLT_EPSILON)
+  {
+    la = 1.0f;
+  }
   else
   {
     la = (-2.0f*_n.dot(_fx)*_gammap*_scaledFd/_d1+sqrt(delta))/(2.0f*std::pow(_fx.norm(),2.0f));
@@ -707,7 +651,8 @@ void FalconControl::computeModulatedDS()
   // Compute modulated DS
   _vd = la*_fx+_gammap*_scaledFd*_n/_d1;
 
-  std::cerr << "[FalconControl]: F: " << _normalForce << " Fd:  " << _Fd << " Fdh:  " << _scaledFd << " ||fx||: " << _fx.norm() << std::endl;
+  Eigen::Vector3f F = -_wRb*_filteredWrench.segment(0,3);
+  std::cerr << "[FalconControl]: F: " << F.norm() << " Fd:  " << _Fd << " Fdh:  " << _scaledFd << " ||fx||: " << _fx.norm() << std::endl;
   // std::cerr << "[FalconControl]: la: " << la << " vd: " << _vd.norm() << std::endl;
   // std::cerr << "[FalconControl]: Tank: " << _s  <<" dW: " << _dW <<std::endl;
 
@@ -795,10 +740,10 @@ void FalconControl::logData()
               << _normalForce << " "
               << _Fd << " "
               << _beliefs.transpose() << " "
-              << _E << " "
               << _sigma << " "
               << _h << " "
-              << _vh.transpose() << std::endl;
+              << _vh.transpose() <<  " " 
+              << _F.transpose() << std::endl;
 }
 
 
