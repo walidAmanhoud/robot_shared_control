@@ -169,12 +169,27 @@ class FalconControl
 		float _smax;			// Max tank level
 		float _alpha;			// Scalar variable controlling the flow of the dissipated energy
 		float _beta;			// Scalar variable controlling the flow of the energy due to the nominal DS
+		float _betap;			// Scalar variable controlling the flow of the energy due to the nominal DS
 		float _gamma;     // Scalar variable controlling the flow of the energy due to the contact force
 		float _gammap;    // Scalar variable adapting the control low to ensure passivity
 		float _pn;				// Power due to the nominal DS
 		float _pf;				// Power due to the contact force
 		float _pd;				// Dissipated power
+		float _pin;
+		float _pout;
+		float _sM;					// Current tank level
+		float _sMmax;			// Max tank level
+		float _alphaM;			// Scalar variable controlling the flow of the dissipated energy
+		float _gammaM;     // Scalar variable controlling the flow of the energy due to the contact force
+		float _gammaMp;    // Scalar variable adapting the control low to ensure passivity
+		float _pfM;				// Power due to the contact force
+		float _pdM;				// Dissipated power
+		float _pinM;
+		float _poutM;
 		float _dW;				// Robot's power flow
+		float _humanFd;
+		Eigen::Vector3f _Fe;
+
 		
 		// User variables
 		float _velocityLimit;				// Velocity limit [m/s]
@@ -247,7 +262,7 @@ class FalconControl
 		// Eigen::Vector3f getCircularMotionVelocity(Eigen::Vector3f position, Eigen::Vector3f attractor);
 
 		// Update scalar variables controlling the tank dynamics
-		// void updateTankScalars();
+		void updateTankScalars();
 
 		// Compute modulated DS
 		void computeModulatedDS();

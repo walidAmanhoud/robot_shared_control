@@ -77,8 +77,10 @@ FalconControl::FalconControl(ros::NodeHandle &n, double frequency, std::string f
   _markersSequenceID.setConstant(0);
   _markersTracked.setConstant(0);
 
-  _smax = 4.0f;
-  _s = _smax;
+  _smax = 10.0f;
+  _s = 10.0f;
+  _sMmax = 10.0f;
+  _sM = 10.0f;
   _dW = 0.0f;
 
   _sequenceID = 0;
@@ -110,6 +112,9 @@ FalconControl::FalconControl(ros::NodeHandle &n, double frequency, std::string f
   _h = 0.0f;
   _sigma = 1.0f;
   _hRate = 0.1f;
+
+  _Fe.setConstant(0.0f);
+  _humanFd = 0.0f;
 
 }
 
@@ -233,6 +238,10 @@ void FalconControl::computeCommand()
   positionVelocityMapping();
 
   _F = -_wRb*_filteredWrench.segment(0,3);
+  _Fe(0) = _F(0);
+  _Fe(1) = _F(1);
+  _Fe(2) = -_F(2);
+
 
   // Update individual
   updateIndividualTasks();
@@ -261,8 +270,10 @@ void FalconControl::computeCommand()
     _n = temp.normalized();
   }
 
-
   forceAdaptation();
+  
+  _humanFd = 2.0f*_h*_Fd;
+
   // Compute force scaling using contact force adaptation
 
 
@@ -328,19 +339,6 @@ void FalconControl::taskAdaptation()
     _n = temp.normalized();
   }
 
-
-  // float efk[NB_TASKS];
-  // float ef = 0.0f;
-  // Eigen::Vector3f Ftk;
-  // // std::cerr << "ef: "; 
-  // for(int k = 0; k < NB_TASKS; k++)
-  // {
-  //   Ftk = (Eigen::Matrix3f::Identity()-_nk[k]*_nk[k].transpose())*_F;
-  //   // efk[k] = F.dot(_nk[k])-2*_h*_Fdk[k]+Ftk.norm();
-  //   efk[k] = _F.norm()-2*_h*_Fdk[k];
-  //   ef += _beliefs[k]*efk[k];
-  //   // std::cerr << efk[k] << " ";
-  // }
   Eigen::MatrixXf::Index indexMax;
   float bmax = _beliefs.array().maxCoeff(&indexMax);
   float ef = _F.norm()-2*_h*_Fdk[indexMax];
@@ -393,33 +391,13 @@ void FalconControl::taskAdaptation()
   for(int k = 0; k < NB_TASKS-1; k++)
   {
     _dbeliefs[k] = _adaptationRate*(_sigma*(_vh-_fx).dot(_fxk[k])+(_beliefs[k]-0.5f)*_fxk[k].squaredNorm())-U;
-
-    // if(ef > efmax)
-    // {
-    //   _dbeliefsF[k] = -_beliefs[NB_TASKS-1]*(ef-efmax)*efk[k];
-    // }
-    // else if(ef < efmin)
-    // {
-    //   _dbeliefsF[k] = -_beliefs[NB_TASKS-1]*(ef-efmin)*efk[k];
-    // }
-    // else 
-    // {
-    //   _dbeliefsF[k] = 0.0f;
-    // }
     _dbeliefsF[k] = -(1-_beliefs[NB_TASKS-1])*Uk[k];
 
     // std::cerr << k << " " << (_vh-_fx).dot(_fxk[k]) << " " <<(_beliefs[k]-0.5f)*_fxk[k].squaredNorm() <<std::endl;
   }
-  // _dbeliefs+=_dbeliefsF;
-  // _dbeliefs[NB_TASKS-1] = _beliefs[NB_TASKS-1]-0.5+(_normalForce-_Fd)*(_normalForce-_Fd);
-  // std::cerr << _beliefs[NB_TASKS-1]-0.5 << " " << (_normalForce-_Fd)*(_normalForce-_Fd) << std::endl;
-
-
+  _dbeliefs+=_dbeliefsF;
   _dbeliefs[NB_TASKS-1] = (_beliefs[NB_TASKS-1]-0.5)+U;
-  // _dbeliefs[NB_TASKS-1] = -100;
-  // std::cerr << _beliefs[NB_TASKS-1]-0.5 << " " << U << std::endl;
 
-  // std::cerr << "dBeliefsF: " << _dbeliefsF.transpose() << std::endl;
   std::cerr << "dBeliefs: " << _dbeliefs.transpose() << std::endl;
 
   // Eigen::MatrixXf::Index indexMax;
@@ -505,7 +483,7 @@ void FalconControl::forceAdaptation()
   {
     k2 = 0.0f;
   }
-  // std::cerr << "k1: " << k1 << " normal distance: " << _normalDistance <<  std::endl;
+  std::cerr << "k1: " << k1 << " k2: " << _normalDistance <<  std::endl;
 
   float dh;
   dh = k1*vhf.dot(_Fd*_n)-k2*_h;
@@ -577,7 +555,7 @@ void FalconControl::computeFalconForce()
 
   // if(fabs(1.0f-_beliefs.array().maxCoeff())<FLT_EPSILON)
   {
-    _FdFalcon = -K*_xFalcon-D*_vFalcon;
+    _FdFalcon = -K*_xFalcon-D*_vFalcon+_Fe;
      if(_buttonsFalcon == (int) CENTER)
      {
       _FdFalcon(2)+=_normalForce;
@@ -591,6 +569,88 @@ void FalconControl::computeFalconForce()
   // std::cerr << "Falcon desired force: " << _FdFalcon.transpose() << " " << std::endl;
 
 }
+void FalconControl::updateTankScalars()
+{
+  _alpha = Utils::smoothFall(_s,_smax-0.1f*_smax,_smax);
+
+  _pn = _d1*_v.dot(_fx);
+
+  if(_s < 0.0f && _pn > 0.0f)
+  {
+    _beta = 0.0f;
+  }
+  else if(_s > _smax && _pn < FLT_EPSILON)
+  {
+    _beta = 0.0f;
+  }
+  else
+  {
+    _beta = 1.0f;
+  }
+  
+  _pf = _humanFd*_v.dot(_n);
+  
+  if(_s < FLT_EPSILON && _pf > FLT_EPSILON)
+  {
+    _gamma = 0.0f;
+  }
+  else if(_s > _smax && _pf < FLT_EPSILON)
+  {
+    _gamma = 0.0f;
+  }
+  else
+  {
+    _gamma = 1.0f;
+  }
+
+  if(_pn<FLT_EPSILON)
+  {
+    _betap = 1.0f;
+  }
+  else
+  {
+    _betap = _beta;
+  }
+
+  if(_pf<FLT_EPSILON)
+  {
+    _gammap = 1.0f;
+  }
+  else
+  {
+    _gammap = _gamma;
+  }
+
+
+  _alphaM = Utils::smoothFall(_sM,_sMmax-0.1f*_sMmax,_sMmax);
+
+ 
+  _pfM = _vFalcon.dot(_Fe);
+  
+  if(_s < FLT_EPSILON && _pfM > FLT_EPSILON)
+  {
+    _gammaM = 0.0f;
+  }
+  else if(_s > _smax && _pfM < FLT_EPSILON)
+  {
+    _gammaM = 0.0f;
+  }
+  else
+  {
+    _gammaM = 1.0f;
+  }
+
+  if(_pfM<FLT_EPSILON)
+  {
+    _gammaMp = 1.0f;
+  }
+  else
+  {
+    _gammaMp = _gammaM;
+  }
+}
+
+
 
 
 void FalconControl::computeModulatedDS()
@@ -602,13 +662,11 @@ void FalconControl::computeModulatedDS()
   }
 
   // Update tank scalar variables
-  // updateTankScalars();
-  _gammap = 1.0f;
-
-  float _scaledFd = 2.0f*_h*_Fd;
+  updateTankScalars();
+  // _gammap = 1.0f;
 
   // Compute modulation gain
-  float delta = std::pow(2.0f*_n.dot(_fx)*_gammap*_scaledFd/_d1,2.0f)+4.0f*std::pow(_fx.norm(),4.0f); 
+  float delta = std::pow(2.0f*_n.dot(_fx)*/*_gammap**/_humanFd/_d1,2.0f)+4.0f*std::pow(_fx.norm(),4.0f); 
   float la;
   if(fabs(_fx.norm())<FLT_EPSILON)
   {
@@ -620,39 +678,52 @@ void FalconControl::computeModulatedDS()
   }
   else
   {
-    la = (-2.0f*_n.dot(_fx)*_gammap*_scaledFd/_d1+sqrt(delta))/(2.0f*std::pow(_fx.norm(),2.0f));
+    la = (-2.0f*_n.dot(_fx)*/*_gammap**/_humanFd/_d1+sqrt(delta))/(2.0f*std::pow(_fx.norm(),2.0f));
   }
 
-  // if(_s < 0.0f && _pn < 0.0f)
-  // {
-  //   la = 1.0f;
-  // }
-
-  // // Update tank dynamics
-  // _pd = _v.transpose()*_D*_v;
-  // float  ds = _dt*(_alpha*_pd-_beta*(la-1.0f)*_pn-_gamma*_pf);
-
-  // if(_s+ds>=_smax)
-  // {
-  //   _s = _smax;
-  // }
-  // else if(_s+ds<=0.0f)
-  // {
-  //   _s = 0.0f;
-  // }
-  // else
-  // {
-  //   _s+=ds;
-  // }
-
+  // Update tank dynamics
+  Eigen::Matrix3f Dm;
+  Dm = _dFalcon*Eigen::Matrix3f::Identity();
+  _pd = _v.transpose()*_D*_v;
+  _pdM = _vFalcon.transpose()*Dm*_vFalcon;
+  _pout = (1.0f-_alpha)*_pd;
+  _pinM = _pout;
+  _poutM = (1.0f-_alphaM)*_pdM;
+  _pin = _poutM;
+  float  ds = _dt*(_alpha*_pd-_beta*la*_pn-_gamma*_pf+_pin-_pout);
+  if(_s+ds>=_smax)
+  {
+    _s = _smax;
+  }
+  else if(_s+ds<=0.0f)
+  {
+    _s = 0.0f;
+  }
+  else
+  {
+    _s+=ds;
+  }
+  std::cerr << "s: " << _s << std::endl;
+  float  dsM = _dt*(_alphaM*_pdM-_gammaM*_pfM+_pinM-_poutM);
+  if(_sM+dsM>=_sMmax)
+  {
+    _sM = _sMmax;
+  }
+  else if(_sM+dsM<=0.0f)
+  {
+    _sM = 0.0f;
+  }
+  else
+  {
+    _sM+=dsM;
+  }
   // // Update robot's power flow
-  // _dW = (la-1.0f)*(1-_beta)*_pn+(_gammap-_gamma)*_pf-(1-_alpha)*_pd;
+  _dW = la*(_betap-_beta)*_pn+(_gammap-_gamma)*_pf+(_gammaMp-_gammaM)*_pfM-(1-_alpha)*_pd-(1-_alphaM)*_pdM;
 
   // Compute modulated DS
-  _vd = la*_fx+_gammap*_scaledFd*_n/_d1;
+  _vd = la*_fx+/*_gammap**/_humanFd*_n/_d1;
 
-  Eigen::Vector3f F = -_wRb*_filteredWrench.segment(0,3);
-  std::cerr << "[FalconControl]: F: " << F.norm() << " Fd:  " << _Fd << " Fdh:  " << _scaledFd << " ||fx||: " << _fx.norm() << std::endl;
+  std::cerr << "[FalconControl]: F: " << _F.norm() << " Fn: " << _F.dot(_n) << " Fd:  " << _Fd << " Fdh:  " << _humanFd << " ||fx||: " << _fx.norm() << std::endl;
   // std::cerr << "[FalconControl]: la: " << la << " vd: " << _vd.norm() << std::endl;
   // std::cerr << "[FalconControl]: Tank: " << _s  <<" dW: " << _dW <<std::endl;
 
@@ -743,7 +814,27 @@ void FalconControl::logData()
               << _sigma << " "
               << _h << " "
               << _vh.transpose() <<  " " 
-              << _F.transpose() << std::endl;
+              << _F.transpose() << " " 
+              << _s << " "
+              << _alpha << " "               
+              << _beta << " "
+              << _betap << " "
+              << _gamma << " "
+              << _gammap << " "
+              << _pn << " "
+              << _pf << " "
+              << _pd << " "
+              << _pin << " "
+              << _pout << " "
+              << _sM << " "
+              << _alphaM << " "
+              << _gammaM << " "
+              << _gammaMp << " "
+              << _pfM << " "
+              << _pdM << " "
+              << _pinM << " "
+              << _poutM << " "
+              << _dW << std::endl;
 }
 
 
