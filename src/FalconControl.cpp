@@ -109,7 +109,7 @@ FalconControl::FalconControl(ros::NodeHandle &n, double frequency, std::string f
   _targetForce = 10.0f;
   _sigmaH =0.0f;
 
-  _h = 0.0f;
+  _h = 0.5f;
   _sigma = 1.0f;
   _hRate = 0.1f;
 
@@ -486,7 +486,7 @@ void FalconControl::forceAdaptation()
   std::cerr << "k1: " << k1 << " k2: " << _normalDistance <<  std::endl;
 
   float dh;
-  dh = k1*vhf.dot(_Fd*_n)-k2*_h;
+  dh = k1*vhf.dot(_Fd*_n)-k2*(_h-0.5);
 
   _h += _hRate*dh*_dt;
 
@@ -499,7 +499,15 @@ void FalconControl::forceAdaptation()
     _h = 1.0f;
   }
 
-  _sigma = Utils::smoothFall(_h,0.0f,0.5f);
+  _sigma = Utils::smoothFall(_h,0.5f,0.75f);
+  // if(_h <0.75)
+  // {
+  //   _sigma = (1+cos(M_PI*_h/0.25))/2.0f;
+  // }
+  // else
+  // {
+  //   _sigma = 0.0f;
+  // }
 }
 
 
@@ -627,11 +635,11 @@ void FalconControl::updateTankScalars()
  
   _pfM = _vFalcon.dot(_Fe);
   
-  if(_s < FLT_EPSILON && _pfM > FLT_EPSILON)
+  if(_sM < FLT_EPSILON && _pfM > FLT_EPSILON)
   {
     _gammaM = 0.0f;
   }
-  else if(_s > _smax && _pfM < FLT_EPSILON)
+  else if(_sM > _smax && _pfM < FLT_EPSILON)
   {
     _gammaM = 0.0f;
   }
@@ -703,7 +711,7 @@ void FalconControl::computeModulatedDS()
   {
     _s+=ds;
   }
-  std::cerr << "s: " << _s << std::endl;
+  // std::cerr << "s: " << _s << std::endl;
   float  dsM = _dt*(_alphaM*_pdM-_gammaM*_pfM+_pinM-_poutM);
   if(_sM+dsM>=_sMmax)
   {
