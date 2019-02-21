@@ -1,9 +1,9 @@
-#include "FootControl.h"
+#include "FeetTelemanipulation.h"
 #include <sstream>
 
 int main(int argc, char **argv)
 {
-  ros::init(argc, argv, "foot_control");
+  ros::init(argc, argv, "feet_telemanipulation");
   ros::NodeHandle n;
   float frequency = 200.0f;
   std::string filename;
@@ -16,16 +16,16 @@ int main(int argc, char **argv)
     return -1;
   }
 
-  FootControl footControl(n,frequency,filename);
+  FeetTelemanipulation feetTelemanipulation(n,frequency,filename);
 
-  if (!footControl.init()) 
+  if (!feetTelemanipulation.init()) 
   {
     return -1;
   }
   else
   {
    
-    footControl.run();
+    feetTelemanipulation.run();
   }
 
   return 0;

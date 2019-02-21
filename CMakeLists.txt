@@ -29,7 +29,7 @@ endif()
 generate_messages(DEPENDENCIES std_msgs)
 
 # Generate dynamic reconfigure parameters
-generate_dynamic_reconfigure_options(cfg/footControl_params.cfg
+generate_dynamic_reconfigure_options(cfg/feetTelemanipulation_params.cfg
                                      cfg/falconControl_params.cfg)
 
 catkin_package(
@@ -43,16 +43,16 @@ include_directories(${EIGEN3_INCLUDE_DIR})
 include_directories(include ${catkin_INCLUDE_DIRS})
 
 
-add_executable(foot_control src/footControl_node.cpp src/FootControl.cpp)
-target_link_libraries(foot_control ${catkin_LIBRARIES})
-add_dependencies(foot_control ${PROJECT_NAME}_gencpp)
+add_executable(feet_telemanipulation src/feetTelemanipulation_node.cpp src/FeetTelemanipulation.cpp)
+target_link_libraries(feet_telemanipulation ${catkin_LIBRARIES})
+add_dependencies(feet_telemanipulation ${PROJECT_NAME}_gencpp)
 
 add_executable(falcon_control src/falconControl_node.cpp src/FalconControl.cpp)
 target_link_libraries(falcon_control ${catkin_LIBRARIES})
 add_dependencies(falcon_control ${PROJECT_NAME}_gencpp)
 
-FILE(GLOB SRCS src/FootControl.cpp src/FalconControl.cpp)
-FILE(GLOB INCS include/FootControl.h include/FalconControl.h)
+FILE(GLOB SRCS src/FeetTelemanipulation.cpp src/FalconControl.cpp)
+FILE(GLOB INCS include/FeetTelemanipulation.h include/FalconControl.h)
 
 add_library(${PROJECT_NAME} ${SRCS} ${INCS})
 target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES})
