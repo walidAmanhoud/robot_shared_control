@@ -289,7 +289,7 @@ void FalconControl::computeCommand()
   Eigen::Vector4f qcurI, wq;
   qcurI(0) = _q(0);
   qcurI.segment(1,3) = -_q.segment(1,3);
-  wq = 5.0f*Utils::quaternionProduct(qcurI,_qd-_q);
+  wq = 5.0f*Utils<float>::quaternionProduct(qcurI,_qd-_q);
   Eigen::Vector3f omegaTemp = _wRb*wq.segment(1,3);
   _omegad = omegaTemp; 
 }
@@ -499,7 +499,7 @@ void FalconControl::forceAdaptation()
     _h = 1.0f;
   }
 
-  _sigma = Utils::smoothFall(_h,0.5f,0.75f);
+  _sigma = Utils<float>::smoothFall(_h,0.5f,0.75f);
   // if(_h <0.75)
   // {
   //   _sigma = (1+cos(M_PI*_h/0.25))/2.0f;
@@ -579,7 +579,7 @@ void FalconControl::computeFalconForce()
 }
 void FalconControl::updateTankScalars()
 {
-  _alpha = Utils::smoothFall(_s,_smax-0.1f*_smax,_smax);
+  _alpha = Utils<float>::smoothFall(_s,_smax-0.1f*_smax,_smax);
 
   _pn = _d1*_v.dot(_fx);
 
@@ -630,7 +630,7 @@ void FalconControl::updateTankScalars()
   }
 
 
-  _alphaM = Utils::smoothFall(_sM,_sMmax-0.1f*_sMmax,_sMmax);
+  _alphaM = Utils<float>::smoothFall(_sM,_sMmax-0.1f*_sMmax,_sMmax);
 
  
   _pfM = _vFalcon.dot(_Fe);
@@ -761,7 +761,7 @@ void FalconControl::computeDesiredOrientation()
   u /= s;
 
   Eigen::Matrix3f K;
-  K << Utils::getSkewSymmetricMatrix(u);
+  K << Utils<float>::getSkewSymmetricMatrix(u);
 
   Eigen::Matrix3f Re;
   if(fabs(s)< FLT_EPSILON)
@@ -776,11 +776,11 @@ void FalconControl::computeDesiredOrientation()
   // Convert rotation error into axis angle representation
   Eigen::Vector3f omega;
   float angle;
-  Eigen::Vector4f qtemp = Utils::rotationMatrixToQuaternion(Re);
-  Utils::quaternionToAxisAngle(qtemp,omega,angle);
+  Eigen::Vector4f qtemp = Utils<float>::rotationMatrixToQuaternion(Re);
+  Utils<float>::quaternionToAxisAngle(qtemp,omega,angle);
 
   // Compute final quaternion on plane
-  Eigen::Vector4f qf = Utils::quaternionProduct(qtemp,_q);
+  Eigen::Vector4f qf = Utils<float>::quaternionProduct(qtemp,_q);
 
   // Perform quaternion slerp interpolation to progressively orient the end effector while approaching the surface
   _normalDistance = (_x-(_xoC+_xoD/2.0f)).dot(_xoD.normalized());
@@ -793,14 +793,14 @@ void FalconControl::computeDesiredOrientation()
   Eigen::Vector4f q0; 
   q0 << 0.0f,0.0f,1.0f,0.0f;
 
-  // _qd = Utils::slerpQuaternion(q0,qf,1.0f-std::tanh(3.0f*_normalDistance));
-  _qd = Utils::slerpQuaternion(q0,qf,Utils::smoothFall(_normalDistance,0.1f,0.6f));
+  // _qd = Utils<float>::slerpQuaternion(q0,qf,1.0f-std::tanh(3.0f*_normalDistance));
+  _qd = Utils<float>::slerpQuaternion(q0,qf,Utils<float>::smoothFall(_normalDistance,0.1f,0.6f));
 
   // Compute needed angular velocity to perform the desired quaternion
   Eigen::Vector4f qcurI, wq;
   qcurI(0) = _q(0);
   qcurI.segment(1,3) = -_q.segment(1,3);
-  wq = 5.0f*Utils::quaternionProduct(qcurI,_qd-_q);
+  wq = 5.0f*Utils<float>::quaternionProduct(qcurI,_qd-_q);
   Eigen::Vector3f omegaTemp = _wRb*wq.segment(1,3);
   _omegad = omegaTemp; 
 }
@@ -910,7 +910,7 @@ void FalconControl::updateRobotPose(const geometry_msgs::Pose::ConstPtr& msg)
   // Update end effecotr pose (position+orientation)
   _x << _msgRealPose.position.x, _msgRealPose.position.y, _msgRealPose.position.z;
   _q << _msgRealPose.orientation.w, _msgRealPose.orientation.x, _msgRealPose.orientation.y, _msgRealPose.orientation.z;
-  _wRb = Utils::quaternionToRotationMatrix(_q);
+  _wRb = Utils<float>::quaternionToRotationMatrix(_q);
   _x = _x+_toolOffsetFromEE*_wRb.col(2);
 
   if((_x-temp).norm()>FLT_EPSILON)

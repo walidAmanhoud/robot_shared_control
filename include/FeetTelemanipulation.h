@@ -141,6 +141,7 @@ class FeetTelemanipulation
 		float _dxy;		
 		float _kphi;		
 		float _dphi;		
+		bool _useSharedControl;
 
 		// Other variables
     double _timeInit;
