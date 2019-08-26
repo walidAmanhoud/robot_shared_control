@@ -18,6 +18,7 @@
 #include "geometry_msgs/Twist.h"
 #include "geometry_msgs/PointStamped.h"
 #include "std_msgs/Float32MultiArray.h"
+#include "std_msgs/Float64MultiArray.h"
 #include "std_msgs/Float32.h"
 #include "visualization_msgs/Marker.h"
 #include <dynamic_reconfigure/server.h>
@@ -62,6 +63,7 @@ class FeetTelemanipulation
 
 		// Publisher declaration
 		ros::Publisher _pubDesiredTwist[NB_ROBOTS];						// Desired twist to DS-impdedance controller
+		ros::Publisher _pubCommand;							   						// Desired twist to DS-impdedance controller
 		ros::Publisher _pubDesiredOrientation[NB_ROBOTS];  		// Desired orientation to DS-impedance controller
 		ros::Publisher _pubFilteredWrench[NB_ROBOTS];					// Filtered measured wrench
 		ros::Publisher _pubNormalForce[NB_ROBOTS];							// Measured normal force
@@ -142,6 +144,10 @@ class FeetTelemanipulation
 		float _kphi;		
 		float _dphi;		
 		bool _useSharedControl;
+		bool _useIIWA;
+		Eigen::Matrix3f _Riiwa;
+		std_msgs::Float64MultiArray _msgCommand;
+
 
 		// Other variables
     double _timeInit;

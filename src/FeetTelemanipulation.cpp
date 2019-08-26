@@ -11,7 +11,7 @@ FeetTelemanipulation::FeetTelemanipulation(ros::NodeHandle &n, double frequency,
 {
   me = this;
 
-  _useLeftRobot = true;
+  _useLeftRobot = false;
   _useRightRobot = true;
 
   _gravity << 0.0f, 0.0f, -9.80665f;
@@ -61,13 +61,20 @@ FeetTelemanipulation::FeetTelemanipulation(ros::NodeHandle &n, double frequency,
   }
 
   _stop = false;
-  _leftRobotOrigin << 0.066f, 0.9f, 0.0f;
-  _x0[LEFT](0) = _leftRobotOrigin(0)-0.60f;
+  // _leftRobotOrigin << 0.066f, 0.9f, 0.0f;
+  // _x0[LEFT](0) = _leftRobotOrigin(0)-0.60f;
+  // _x0[LEFT](1) = _leftRobotOrigin(1)-0.35f;
+  // _x0[LEFT](2) = _leftRobotOrigin(2)+0.45f;
+  // _x0[RIGHT](0) = -0.52f;
+  // _x0[RIGHT](1) = 0.4f;
+  // _x0[RIGHT](2) = 0.45f;
+  _leftRobotOrigin << -0.03f, 0.93f, -0.1f;
+  _x0[LEFT](0) = _leftRobotOrigin(0)-0.50f;
   _x0[LEFT](1) = _leftRobotOrigin(1)-0.35f;
   _x0[LEFT](2) = _leftRobotOrigin(2)+0.45f;
-  _x0[RIGHT](0) = -0.52f;
-  _x0[RIGHT](1) = 0.4f;
-  _x0[RIGHT](2) = 0.45f;
+  _x0[RIGHT](0) = -0.60f;
+  _x0[RIGHT](1) = 0.35f;
+  _x0[RIGHT](2) = 0.35f;
   _graspingForceThreshold = 4.0f;  // Grasping force threshold [N]
   _objectGrasped = false;
   _targetForce = 15.0f;
@@ -78,6 +85,18 @@ FeetTelemanipulation::FeetTelemanipulation(ros::NodeHandle &n, double frequency,
   _kphi = 0.0f;
   _dphi = 0.0f;
 
+  _useIIWA = true;
+
+  _Riiwa << -1.0f, 0.0f, 0.0f, 
+            0.0f, -1.0f, 0.0f, 
+            0.0f, 0.0f, 1.0f; 
+
+  _msgCommand.data.resize(10);
+  for(int k = 0; k < 10 ;k++)
+  {
+    _msgCommand.data[k] = 0.0f;
+  }
+
   // _strategy = AUTONOMOUS_LOAD_SUPPORT;
   _strategy = PURE_TELEMANIPULATION;
 }
@@ -87,14 +106,22 @@ bool FeetTelemanipulation::init()
 {
   // Subscriber definitions
   _subRobotPose[LEFT] = _n.subscribe<geometry_msgs::Pose>("/lwr2/ee_pose", 1, boost::bind(&FeetTelemanipulation::updateRobotPose,this,_1,LEFT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
-  _subRobotTwist[LEFT] = _n.subscribe<geometry_msgs::Twist>("/lwr2/joint_controllers/twist", 1, boost::bind(&FeetTelemanipulation::updateRobotTwist,this,_1,LEFT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+  _subRobotTwist[LEFT] = _n.subscribe<geometry_msgs::Twist>("/lwr2/ee_vel", 1, boost::bind(&FeetTelemanipulation::updateRobotTwist,this,_1,LEFT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
   _subDampingMatrix[LEFT] = _n.subscribe<std_msgs::Float32MultiArray>("/lwr2/joint_controllers/passive_ds_damping_matrix", 1, boost::bind(&FeetTelemanipulation::updateDampingMatrix,this,_1,LEFT),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
   _subForceTorqueSensor[LEFT] = _n.subscribe<geometry_msgs::WrenchStamped>("/ft_sensor_left/netft_data", 1, boost::bind(&FeetTelemanipulation::updateRobotWrench,this,_1,LEFT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
   _subFootOutput[LEFT] = _n.subscribe<custom_msgs::FootOutputMsg>("/FI_Output/Left",1, boost::bind(&FeetTelemanipulation::updateFootOutput,this,_1,LEFT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
 
-  _subRobotPose[RIGHT] = _n.subscribe<geometry_msgs::Pose>("/lwr/ee_pose", 1, boost::bind(&FeetTelemanipulation::updateRobotPose,this,_1,RIGHT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
-  _subRobotTwist[RIGHT] = _n.subscribe<geometry_msgs::Twist>("/lwr/joint_controllers/twist", 1, boost::bind(&FeetTelemanipulation::updateRobotTwist,this,_1,RIGHT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
-  _subDampingMatrix[RIGHT] = _n.subscribe<std_msgs::Float32MultiArray>("/lwr/joint_controllers/passive_ds_damping_matrix", 1, boost::bind(&FeetTelemanipulation::updateDampingMatrix,this,_1,RIGHT),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());
+  if(_useIIWA)
+  {
+    _subRobotPose[RIGHT] = _n.subscribe<geometry_msgs::Pose>("/iiwa/ee_pose", 1, boost::bind(&FeetTelemanipulation::updateRobotPose,this,_1,RIGHT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+    _subRobotTwist[RIGHT] = _n.subscribe<geometry_msgs::Twist>("/iiwa/ee_twist", 1, boost::bind(&FeetTelemanipulation::updateRobotTwist,this,_1,RIGHT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+  }
+  else
+  {
+    _subRobotPose[RIGHT] = _n.subscribe<geometry_msgs::Pose>("/lwr/ee_pose", 1, boost::bind(&FeetTelemanipulation::updateRobotPose,this,_1,RIGHT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+    _subRobotTwist[RIGHT] = _n.subscribe<geometry_msgs::Twist>("/lwr/joint_controllers/twist", 1, boost::bind(&FeetTelemanipulation::updateRobotTwist,this,_1,RIGHT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
+    _subDampingMatrix[RIGHT] = _n.subscribe<std_msgs::Float32MultiArray>("/lwr/joint_controllers/passive_ds_damping_matrix", 1, boost::bind(&FeetTelemanipulation::updateDampingMatrix,this,_1,RIGHT),ros::VoidPtr(),ros::TransportHints().reliable().tcpNoDelay());    
+  }
   _subForceTorqueSensor[RIGHT] = _n.subscribe<geometry_msgs::WrenchStamped>("/ft_sensor_right/netft_data", 1, boost::bind(&FeetTelemanipulation::updateRobotWrench,this,_1,RIGHT),ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
   _subFootOutput[RIGHT] = _n.subscribe<custom_msgs::FootOutputMsg>("/FI_Output/Right",1, boost::bind(&FeetTelemanipulation::updateFootOutput,this,_1,RIGHT), ros::VoidPtr(), ros::TransportHints().reliable().tcpNoDelay());
  
@@ -105,8 +132,16 @@ bool FeetTelemanipulation::init()
   _pubNormalForce[LEFT] = _n.advertise<std_msgs::Float32>("FeetTelemanipulation/normalForceLeft", 1);
   _pubFootInput[LEFT] = _n.advertise<custom_msgs::FootInputMsg>("/FI_Input/Left", 1);
 
-  _pubDesiredTwist[RIGHT] = _n.advertise<geometry_msgs::Twist>("/lwr/joint_controllers/passive_ds_command_vel", 1);
-  _pubDesiredOrientation[RIGHT] = _n.advertise<geometry_msgs::Quaternion>("/lwr/joint_controllers/passive_ds_command_orient", 1);
+  if(_useIIWA)
+  {
+    _pubCommand = _n.advertise<std_msgs::Float64MultiArray>("/iiwa/DSImpedance/command", 1);
+  }
+  else
+  {
+    _pubDesiredTwist[RIGHT] = _n.advertise<geometry_msgs::Twist>("/lwr/joint_controllers/passive_ds_command_vel", 1);
+    _pubDesiredOrientation[RIGHT] = _n.advertise<geometry_msgs::Quaternion>("/lwr/joint_controllers/passive_ds_command_orient", 1);
+  }
+
   _pubFilteredWrench[RIGHT] = _n.advertise<geometry_msgs::WrenchStamped>("FeetTelemanipulation/filteredWrenchRight", 1);
   _pubNormalForce[RIGHT] = _n.advertise<std_msgs::Float32>("FeetTelemanipulation/normalForceRight", 1);
   _pubFootInput[RIGHT] = _n.advertise<custom_msgs::FootInputMsg>("/FI_Input/Right", 1);
@@ -119,9 +154,13 @@ bool FeetTelemanipulation::init()
 
   _outputFile.open(ros::package::getPath(std::string("robot_shared_control"))+"/data_foot/"+_filename+".txt");
 
-  if(!_n.getParamCached("/lwr/ds_param/damping_eigval0",_d1[RIGHT]) && _useRightRobot)
+  if(!_n.getParamCached("/lwr/ds_param/damping_eigval0",_d1[RIGHT]) && _useRightRobot && !_useIIWA )
   {
     ROS_ERROR("[FeetTelemanipulation]: Cannot read first eigen value of passive ds controller for right robot");
+    return false;
+  }
+  else if(!_n.getParamCached("/iiwa/DSImpedance/gain0",_d1[RIGHT]) && _useRightRobot && _useIIWA)
+  {
     return false;
   }
 
@@ -157,7 +196,14 @@ void FeetTelemanipulation::run()
       _mutex.lock();
 
       // Check for update of the DS-impedance controller gain
-      ros::param::getCached("/lwr/ds_param/damping_eigval0",_d1[RIGHT]);
+      if(_useIIWA)
+      {
+        ros::param::getCached("/iiwa/DSImpedance/gain0",_d1[RIGHT]);        
+      }
+      else
+      {
+        ros::param::getCached("/lwr/ds_param/damping_eigval0",_d1[RIGHT]);
+      }
       ros::param::getCached("/lwr2/ds_param/damping_eigval0",_d1[LEFT]);
           
       // Compute control command
@@ -203,7 +249,7 @@ void FeetTelemanipulation::stopNode(int sig)
 
 bool FeetTelemanipulation::allDataReceived()
 {
-  if(_useLeftRobot && _useRightRobot)
+  if(_useLeftRobot && _useRightRobot && !_useIIWA)
   {
     // std::cerr <<(int) _firstRobotPose[RIGHT] << (int) _firstRobotTwist[RIGHT] << (int) _wrenchBiasOK[RIGHT] << (int) _firstDampingMatrix[RIGHT] << (int) _firstFootOutput[RIGHT] << (int)
     //         _firstRobotPose[LEFT] << (int) _firstRobotTwist[LEFT] << (int) _wrenchBiasOK[LEFT] << (int) _firstDampingMatrix[LEFT] << (int) _firstFootOutput[LEFT] << std::endl;
@@ -211,13 +257,21 @@ bool FeetTelemanipulation::allDataReceived()
             _firstRobotPose[LEFT] && _firstRobotTwist[LEFT] && _wrenchBiasOK[LEFT] && _firstDampingMatrix[LEFT] && _firstFootOutput[LEFT]);
      
   }
+  else if(_useLeftRobot && _useRightRobot && _useIIWA)
+  {
+    // std::cerr <<(int) _firstRobotPose[RIGHT] << (int) _firstRobotTwist[RIGHT] << (int) _wrenchBiasOK[RIGHT] << (int) _firstDampingMatrix[RIGHT] << (int) _firstFootOutput[RIGHT] << (int)
+    //         _firstRobotPose[LEFT] << (int) _firstRobotTwist[LEFT] << (int) _wrenchBiasOK[LEFT] << (int) _firstDampingMatrix[LEFT] << (int) _firstFootOutput[LEFT] << std::endl;
+
+    return (_firstRobotPose[RIGHT] && _firstRobotTwist[RIGHT] && _wrenchBiasOK[RIGHT] && _firstFootOutput[RIGHT] &&
+            _firstRobotPose[LEFT] && _firstRobotTwist[LEFT] && _wrenchBiasOK[LEFT] && _firstDampingMatrix[LEFT] && _firstFootOutput[LEFT]);
+  }
   else if(_useLeftRobot)
   {
     return (_firstRobotPose[LEFT] && _firstRobotTwist[LEFT] && _wrenchBiasOK[LEFT] && _firstDampingMatrix[LEFT] && _firstFootOutput[LEFT]);
   }
   else if(_useRightRobot)
   {
-    return (_firstRobotPose[RIGHT] && _firstRobotTwist[RIGHT] && _wrenchBiasOK[RIGHT] && _firstDampingMatrix[RIGHT] && _firstFootOutput[RIGHT]);
+    return (_firstRobotPose[RIGHT] && _firstRobotTwist[RIGHT] && _wrenchBiasOK[RIGHT] && _firstFootOutput[RIGHT]);
   }
   else
   {
@@ -236,6 +290,8 @@ void FeetTelemanipulation::computeCommand()
 
   updateObjectGraspingState();
 
+  std::cerr << "x Left: " << _x[LEFT].transpose() << std::endl;
+  std::cerr << "x Right: " << _x[RIGHT].transpose() << std::endl;
   switch(_strategy)
   {
     case PURE_TELEMANIPULATION:
@@ -282,7 +338,11 @@ void FeetTelemanipulation::positionPositionMapping()
   for(int k = 0; k < NB_ROBOTS; k++)
   {
     _xdFoot[k] = gains[k].cwiseProduct(_footPosition[k]);
-    // std::cerr << "Master position " << k << " : " <<_xdFoot[k].transpose() << std::endl;
+    if(_xdFoot[k](2)+_x0[k](2)<0.03f)
+    {
+      _xdFoot[k](2) = 0.03f-_x0[k](2);
+    }
+    std::cerr << "Master position " << k << " : " <<_xdFoot[k].transpose() << std::endl;
   }
 }
 
@@ -460,11 +520,17 @@ void FeetTelemanipulation::computeDesiredOrientation()
   for(int k = 0; k < NB_ROBOTS; k++)
   {
     Eigen::Matrix3f Rd;
-    if(k == RIGHT)
+    if(k == RIGHT && !_useIIWA)
     {
       Rd << -1.0f, 0.0f, 0.0f,
             0.0f, 0.0f, 1.0f,
             0.0f, 1.0f, 0.0f;
+    }
+    else if(k==RIGHT && _useIIWA)
+    {
+      Rd << 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f,
+            0.0f, -1.0f, 0.0f;
     }
     else
     {
@@ -477,7 +543,10 @@ void FeetTelemanipulation::computeDesiredOrientation()
 
     if(_q[k].dot(_qd[k])<0)
     {
+      // std::cerr << _q[k].transpose() << std::endl;
+      // std::cerr << _qd[k].transpose() << std::endl;
       _qd[k] *=-1.0f;
+      // std::cerr << "BOU" << std::endl;
     }
 
     //   Rd << -1.0f, 0.0f, 0.0f,
@@ -554,24 +623,53 @@ void FeetTelemanipulation::publishData()
   for(int k = 0; k < NB_ROBOTS; k++)
   {
     // Publish desired twist (passive ds controller)
-    _msgDesiredTwist.linear.x  = _vd[k](0);
-    _msgDesiredTwist.linear.y  = _vd[k](1);
-    _msgDesiredTwist.linear.z  = _vd[k](2);
+    if(k == RIGHT && _useIIWA)
+    {
+      Eigen::Vector3f vd, omegad;
+      Eigen::Vector4f qd,q;
+      Eigen::Matrix3f Rd,R;
+      vd = _Riiwa.transpose()*_vd[k];
+      omegad = _Riiwa.transpose()*_omegad[k];
+      Rd = Utils<float>::quaternionToRotationMatrix(_qd[k]);
+      q = Utils<float>::rotationMatrixToQuaternion(_Riiwa.transpose()*_wRb[k]);
+      qd = Utils<float>::rotationMatrixToQuaternion(_Riiwa.transpose()*Rd);
+      if(q.dot(qd)<0)
+      {
+        qd *=-1.0f;
+      }
 
-    // Convert desired end effector frame angular velocity to world frame
-    _msgDesiredTwist.angular.x = _omegad[k](0);
-    _msgDesiredTwist.angular.y = _omegad[k](1);
-    _msgDesiredTwist.angular.z = _omegad[k](2);
+      for(int m = 0; m < 3; m++)
+      {
+        _msgCommand.data[m]  = vd(m);
+        _msgCommand.data[m+3]  = omegad(m);
+      }
+      for(int m = 0; m < 4; m++)
+      {
+        _msgCommand.data[m+6]  = qd(m);
+      }
+      _pubCommand.publish(_msgCommand);
+    }
+    else
+    {
+      _msgDesiredTwist.linear.x  = _vd[k](0);
+      _msgDesiredTwist.linear.y  = _vd[k](1);
+      _msgDesiredTwist.linear.z  = _vd[k](2);
 
-    _pubDesiredTwist[k].publish(_msgDesiredTwist);
+      // Convert desired end effector frame angular velocity to world frame
+      _msgDesiredTwist.angular.x = _omegad[k](0);
+      _msgDesiredTwist.angular.y = _omegad[k](1);
+      _msgDesiredTwist.angular.z = _omegad[k](2);
 
-    // Publish desired orientation
-    _msgDesiredOrientation.w = _qd[k](0);
-    _msgDesiredOrientation.x = _qd[k](1);
-    _msgDesiredOrientation.y = _qd[k](2);
-    _msgDesiredOrientation.z = _qd[k](3);
+      _pubDesiredTwist[k].publish(_msgDesiredTwist);
 
-    _pubDesiredOrientation[k].publish(_msgDesiredOrientation);
+      // Publish desired orientation
+      _msgDesiredOrientation.w = _qd[k](0);
+      _msgDesiredOrientation.x = _qd[k](1);
+      _msgDesiredOrientation.y = _qd[k](2);
+      _msgDesiredOrientation.z = _qd[k](3);
+
+      _pubDesiredOrientation[k].publish(_msgDesiredOrientation);
+    }
 
     _msgFilteredWrench.header.frame_id = "world";
     _msgFilteredWrench.header.stamp = ros::Time::now();
@@ -607,7 +705,17 @@ void FeetTelemanipulation::updateRobotPose(const geometry_msgs::Pose::ConstPtr& 
   _x[k] << msg->position.x, msg->position.y, msg->position.z;
   _q[k] << msg->orientation.w, msg->orientation.x, msg->orientation.y, msg->orientation.z;
   _wRb[k] = Utils<float>::quaternionToRotationMatrix(_q[k]);
+  
+  if(k==RIGHT && _useIIWA)
+  {
+    _x[k] = _Riiwa*_x[k];
+    _wRb[k] = _Riiwa*_wRb[k];
+    _q[k] = Utils<float>::rotationMatrixToQuaternion(_wRb[k]);
+
+  }
   _x[k] = _x[k]+_toolOffsetFromEE*_wRb[k].col(2);
+
+
 
   if(k==(int)LEFT)
   {
@@ -629,6 +737,12 @@ void FeetTelemanipulation::updateRobotTwist(const geometry_msgs::Twist::ConstPtr
 {
   _v[k] << msg->linear.x, msg->linear.y, msg->linear.z;
   _w[k] << msg->angular.x, msg->angular.y, msg->angular.z;
+
+  if(k==RIGHT && _useIIWA)
+  {
+    _v[k] = _Riiwa*_v[k];
+    _w[k] = _Riiwa*_w[k];
+  }
 
   if(!_firstRobotTwist[k])
   {
